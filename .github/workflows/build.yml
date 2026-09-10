@@ -6,9 +6,27 @@ on:
 jobs:
   build-windows:
     runs-on: windows-latest
+
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+
+      - name: Verify Adaptive KV source
+        shell: pwsh
+        run: |
+          Write-Host "Checking repository for Adaptive KV support..."
+
+          $matches = Get-ChildItem -Path . -Recurse -File |
+            Select-String "kv-stream-stage-mib" -ErrorAction SilentlyContinue
+
+          if (-not $matches) {
+            throw "ERROR: Adaptive KV source was not found in this repository."
+          }
+
+          Write-Host "Adaptive KV source found:"
+          $matches | Select-Object -First 10 | ForEach-Object {
+            Write-Host "$($_.Path):$($_.LineNumber)"
+          }
 
       - name: Setup CUDA Toolkit 13.2
         id: cuda
@@ -16,22 +34,79 @@ jobs:
         with:
           cuda-version: '13.2.0'
 
-      - name: Build llama-server
+      - name: Configure CMake
+        shell: pwsh
         run: |
-          cmake -S . -B build -DGGML_CUDA=ON -DGGML_CUDA_FA_ALL_QUANTS=ON -DCMAKE_CUDA_ARCHITECTURES=120 -DCMAKE_CUDA_COMPILER="${{ steps.cuda.outputs.CUDA_PATH }}/bin/nvcc.exe" -DCMAKE_BUILD_TYPE=Release
-          cmake --build build --config Release --target llama-server -j 4
+          if (Test-Path build) {
+            Remove-Item -Recurse -Force build
+          }
+
+          cmake -S . -B build `
+            -DGGML_CUDA=ON `
+            -DGGML_CUDA_FA_ALL_QUANTS=ON `
+            -DCMAKE_CUDA_ARCHITECTURES=120 `
+            -DCMAKE_CUDA_COMPILER="${{ steps.cuda.outputs.CUDA_PATH }}/bin/nvcc.exe" `
+            -DCMAKE_BUILD_TYPE=Release
+
+      - name: Build llama-server
+        shell: pwsh
+        run: |
+          cmake --build build `
+            --config Release `
+            --target llama-server `
+            -j 4
+
+      - name: Verify Adaptive KV in compiled binary
+        shell: pwsh
+        run: |
+          $server = ".\build\bin\Release\llama-server.exe"
+
+          if (-not (Test-Path $server)) {
+            throw "ERROR: llama-server.exe was not produced."
+          }
+
+          Write-Host ""
+          Write-Host "Checking compiled llama-server for Adaptive KV support..."
+          Write-Host ""
+
+          $help = & $server --help 2>&1 | Out-String
+
+          if ($help -notmatch "kv-stream-stage-mib") {
+            throw "ERROR: --kv-stream-stage-mib is NOT present in the compiled llama-server."
+          }
+
+          Write-Host "SUCCESS!"
+          Write-Host "Adaptive KV streaming is compiled into llama-server."
+          Write-Host ""
+
+          $help -split "`r?`n" |
+            Where-Object { $_ -match "kv-stream-stage-mib" } |
+            ForEach-Object { Write-Host $_ }
 
       - name: Upload Windows Binary
         uses: actions/upload-artifact@v4
         with:
-          name: llama-server-windows-sm120-cu13
+          name: llama-server-windows-sm120-cu13-adaptive-kv
           path: build/bin/Release/llama-server.exe
+
 
   build-linux:
     runs-on: ubuntu-latest
+
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+
+      - name: Verify Adaptive KV source
+        shell: bash
+        run: |
+          echo "Checking repository for Adaptive KV support..."
+
+          if ! grep -R -n --exclude-dir=.git \
+            "kv-stream-stage-mib" . | head -10; then
+            echo "ERROR: Adaptive KV source was not found."
+            exit 1
+          fi
 
       - name: Setup CUDA Toolkit 13.2
         id: cuda
@@ -39,14 +114,47 @@ jobs:
         with:
           cuda-version: '13.2.0'
 
-      - name: Build llama-server
+      - name: Configure CMake
+        shell: bash
         run: |
+          rm -rf build
+
           export PATH="${{ steps.cuda.outputs.CUDA_PATH }}/bin:$PATH"
-          cmake -S . -B build -DGGML_CUDA=ON -DGGML_CUDA_FA_ALL_QUANTS=ON -DCMAKE_CUDA_ARCHITECTURES=120 -DCMAKE_CUDA_COMPILER="${{ steps.cuda.outputs.CUDA_PATH }}/bin/nvcc" -DCMAKE_BUILD_TYPE=Release
-          cmake --build build --config Release --target llama-server -j 4
+
+          cmake -S . -B build \
+            -DGGML_CUDA=ON \
+            -DGGML_CUDA_FA_ALL_QUANTS=ON \
+            -DCMAKE_CUDA_ARCHITECTURES=120 \
+            -DCMAKE_CUDA_COMPILER="${{ steps.cuda.outputs.CUDA_PATH }}/bin/nvcc" \
+            -DCMAKE_BUILD_TYPE=Release
+
+      - name: Build llama-server
+        shell: bash
+        run: |
+          cmake --build build \
+            --config Release \
+            --target llama-server \
+            -j 4
+
+      - name: Verify Adaptive KV in compiled binary
+        shell: bash
+        run: |
+          SERVER="./build/bin/llama-server"
+
+          if [ ! -f "$SERVER" ]; then
+            echo "ERROR: llama-server was not produced."
+            exit 1
+          fi
+
+          if ! "$SERVER" --help 2>&1 | grep -q "kv-stream-stage-mib"; then
+            echo "ERROR: --kv-stream-stage-mib is NOT present in the compiled llama-server."
+            exit 1
+          fi
+
+          echo "SUCCESS: Adaptive KV streaming is compiled into llama-server."
 
       - name: Upload Linux Binary
         uses: actions/upload-artifact@v4
         with:
-          name: llama-server-linux-sm120-cu13
+          name: llama-server-linux-sm120-cu13-adaptive-kv
           path: build/bin/llama-server
