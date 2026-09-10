@@ -1,4 +1,4 @@
-name: Build Adaptive KV llama-server (Blackwell sm120)
+name: Build Adaptive KV llama-server (Blackwell sm120 - CUDA 13)
 
 on:
   workflow_dispatch:
@@ -10,20 +10,21 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Setup CUDA Toolkit 12.8
-        uses: Jimver/cuda-toolkit@v0.2.19
+      - name: Setup CUDA Toolkit 13.2
+        id: cuda
+        uses: Jimver/cuda-toolkit@v0.2.36
         with:
-          cuda-version: '12.8.0'
+          cuda-version: '13.2.0'
 
       - name: Build llama-server
         run: |
-          cmake -S . -B build -DGGML_CUDA=ON -DGGML_CUDA_FA_ALL_QUANTS=ON -DCMAKE_CUDA_ARCHITECTURES=120 -DCMAKE_BUILD_TYPE=Release
+          cmake -S . -B build -DGGML_CUDA=ON -DGGML_CUDA_FA_ALL_QUANTS=ON -DCMAKE_CUDA_ARCHITECTURES=120 -DCMAKE_CUDA_COMPILER="${{ steps.cuda.outputs.CUDA_PATH }}/bin/nvcc.exe" -DCMAKE_BUILD_TYPE=Release
           cmake --build build --config Release --target llama-server -j 4
 
       - name: Upload Windows Binary
         uses: actions/upload-artifact@v4
         with:
-          name: llama-server-windows-sm120
+          name: llama-server-windows-sm120-cu13
           path: build/bin/Release/llama-server.exe
 
   build-linux:
@@ -32,18 +33,20 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Setup CUDA Toolkit 12.8
-        uses: Jimver/cuda-toolkit@v0.2.19
+      - name: Setup CUDA Toolkit 13.2
+        id: cuda
+        uses: Jimver/cuda-toolkit@v0.2.36
         with:
-          cuda-version: '12.8.0'
+          cuda-version: '13.2.0'
 
       - name: Build llama-server
         run: |
-          cmake -S . -B build -DGGML_CUDA=ON -DGGML_CUDA_FA_ALL_QUANTS=ON -DCMAKE_CUDA_ARCHITECTURES=120 -DCMAKE_BUILD_TYPE=Release
+          export PATH="${{ steps.cuda.outputs.CUDA_PATH }}/bin:$PATH"
+          cmake -S . -B build -DGGML_CUDA=ON -DGGML_CUDA_FA_ALL_QUANTS=ON -DCMAKE_CUDA_ARCHITECTURES=120 -DCMAKE_CUDA_COMPILER="${{ steps.cuda.outputs.CUDA_PATH }}/bin/nvcc" -DCMAKE_BUILD_TYPE=Release
           cmake --build build --config Release --target llama-server -j 4
 
       - name: Upload Linux Binary
         uses: actions/upload-artifact@v4
         with:
-          name: llama-server-linux-sm120
+          name: llama-server-linux-sm120-cu13
           path: build/bin/llama-server
