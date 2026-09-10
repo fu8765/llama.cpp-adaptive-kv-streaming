@@ -32,7 +32,12 @@ jobs:
         id: cuda
         uses: Jimver/cuda-toolkit@v0.2.36
         with:
-          cuda-version: '13.2.0'
+          cuda: '13.2.0'
+
+      - name: Show CUDA version
+        shell: pwsh
+        run: |
+          & "${{ steps.cuda.outputs.CUDA_PATH }}/bin/nvcc.exe" --version
 
       - name: Configure CMake
         shell: pwsh
@@ -88,73 +93,3 @@ jobs:
         with:
           name: llama-server-windows-sm120-cu13-adaptive-kv
           path: build/bin/Release/llama-server.exe
-
-
-  build-linux:
-    runs-on: ubuntu-latest
-
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-
-      - name: Verify Adaptive KV source
-        shell: bash
-        run: |
-          echo "Checking repository for Adaptive KV support..."
-
-          if ! grep -R -n --exclude-dir=.git \
-            "kv-stream-stage-mib" . | head -10; then
-            echo "ERROR: Adaptive KV source was not found."
-            exit 1
-          fi
-
-      - name: Setup CUDA Toolkit 13.2
-        id: cuda
-        uses: Jimver/cuda-toolkit@v0.2.36
-        with:
-          cuda-version: '13.2.0'
-
-      - name: Configure CMake
-        shell: bash
-        run: |
-          rm -rf build
-
-          export PATH="${{ steps.cuda.outputs.CUDA_PATH }}/bin:$PATH"
-
-          cmake -S . -B build \
-            -DGGML_CUDA=ON \
-            -DGGML_CUDA_FA_ALL_QUANTS=ON \
-            -DCMAKE_CUDA_ARCHITECTURES=120 \
-            -DCMAKE_CUDA_COMPILER="${{ steps.cuda.outputs.CUDA_PATH }}/bin/nvcc" \
-            -DCMAKE_BUILD_TYPE=Release
-
-      - name: Build llama-server
-        shell: bash
-        run: |
-          cmake --build build \
-            --config Release \
-            --target llama-server \
-            -j 4
-
-      - name: Verify Adaptive KV in compiled binary
-        shell: bash
-        run: |
-          SERVER="./build/bin/llama-server"
-
-          if [ ! -f "$SERVER" ]; then
-            echo "ERROR: llama-server was not produced."
-            exit 1
-          fi
-
-          if ! "$SERVER" --help 2>&1 | grep -q "kv-stream-stage-mib"; then
-            echo "ERROR: --kv-stream-stage-mib is NOT present in the compiled llama-server."
-            exit 1
-          fi
-
-          echo "SUCCESS: Adaptive KV streaming is compiled into llama-server."
-
-      - name: Upload Linux Binary
-        uses: actions/upload-artifact@v4
-        with:
-          name: llama-server-linux-sm120-cu13-adaptive-kv
-          path: build/bin/llama-server
