@@ -1755,6 +1755,7 @@ struct llama_context_params common_context_params_to_llama(const common_params &
     cparams.type_k = params.cache_type_k;
     cparams.type_v = params.cache_type_v;
     cparams.kv_stream_arena_mib = params.kv_stream_arena_mib;
+    cparams.n_max_spec_draft = (uint32_t) std::max(0, common_speculative_n_max(&params.speculative));
 
     return cparams;
 }

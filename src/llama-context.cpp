@@ -121,6 +121,7 @@ llama_context::llama_context(
     cparams.embeddings_nextn_masked = false;
     cparams.offload_kqv             = params.offload_kqv;
     cparams.kv_stream_arena_mib     = params.kv_stream_arena_mib;
+    cparams.n_max_spec_draft        = params.n_max_spec_draft;
     cparams.no_perf                 = params.no_perf;
     cparams.warmup                  = false;
 
@@ -841,7 +842,8 @@ bool llama_context::kv_stream_switch_phase(
 
     const uint32_t n_seqs = cparams.n_seq_max;
     const uint32_t n_tokens = decode ?
-        n_seqs : std::min(cparams.n_ctx, cparams.n_ubatch);
+        std::max(n_seqs, 1u + cparams.n_max_spec_draft) :
+        std::min(cparams.n_ctx, cparams.n_ubatch);
     const uint32_t n_outputs = decode ?
         n_seqs : std::min(n_tokens, cparams.n_outputs_max);
     auto * gf = graph_reserve(
@@ -941,8 +943,12 @@ void llama_context::sched_reserve() {
         const int n_splits_pp = ggml_backend_sched_get_n_splits(sched.get());
         const int n_nodes_pp = ggml_graph_n_nodes(gf_pp);
 
+        // the token-generation slab must fit a spec verify batch (1 sequence,
+        // 1 + n_draft tokens), which can be wider than pure token generation
+        const uint32_t n_tokens_tg =
+            std::max(n_seqs, 1u + cparams.n_max_spec_draft);
         auto * gf_tg = graph_reserve(
-            n_seqs, n_seqs, n_seqs, mctx.get(), true, sizes_tg.data());
+            n_tokens_tg, n_seqs, n_seqs, mctx.get(), true, sizes_tg.data());
         if (gf_tg == nullptr) {
             throw std::runtime_error("failed to measure compute tg buffers");
         }
@@ -1792,11 +1798,15 @@ llm_graph_result * llama_context::process_ubatch(const llama_ubatch & ubatch, ll
                 const bool generation =
                     llama_kv_stream_phase_is_generation(
                         phase, ubatch.n_tokens);
+                // a valid decode/verify batch is at most the wider of pure
+                // generation (n_seq_max tokens) and a spec verify batch
+                const uint32_t n_tokens_gen_max =
+                    std::max(cparams.n_seq_max, 1u + cparams.n_max_spec_draft);
                 if (kv_stream_phase_arena.configured && generation &&
-                        ubatch.n_tokens != cparams.n_seq_max) {
+                        ubatch.n_tokens > n_tokens_gen_max) {
                     LLAMA_LOG_ERROR(
-                        "%s: phase arena currently supports TG1 without speculative batches\n",
-                        __func__);
+                        "%s: phase arena decode batch too wide: %u tokens > %u max\n",
+                        __func__, (unsigned) ubatch.n_tokens, n_tokens_gen_max);
                     ret = GGML_STATUS_FAILED;
                     return nullptr;
                 }
@@ -4118,6 +4128,7 @@ llama_context_params llama_context_default_params() {
         /*.type_k                      =*/ GGML_TYPE_F16,
         /*.type_v                      =*/ GGML_TYPE_F16,
         /*.kv_stream_arena_mib         =*/ 0,
+        /*.n_max_spec_draft            =*/ 0,
         /*.abort_callback              =*/ nullptr,
         /*.abort_callback_data         =*/ nullptr,
         /*.embeddings                  =*/ false,
