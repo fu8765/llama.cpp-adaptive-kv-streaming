@@ -390,6 +390,7 @@ extern "C" {
         enum ggml_type type_v; // data type for V cache [EXPERIMENTAL]
         uint32_t kv_stream_arena_mib; // shared CUDA KV + compute arena, 0 = disabled [EXPERIMENTAL]
         uint32_t n_max_spec_draft;    // max speculative draft tokens, 0 = none [EXPERIMENTAL]
+        bool     spec_mtp;            // MTP speculative decoding is enabled, shares the KV arena with the target [EXPERIMENTAL]
 
         // Abort callback
         // if it returns true, execution of llama_decode() will be aborted

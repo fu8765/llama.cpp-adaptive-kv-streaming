@@ -122,6 +122,7 @@ llama_context::llama_context(
     cparams.offload_kqv             = params.offload_kqv;
     cparams.kv_stream_arena_mib     = params.kv_stream_arena_mib;
     cparams.n_max_spec_draft        = params.n_max_spec_draft;
+    cparams.spec_mtp                = params.spec_mtp;
     cparams.no_perf                 = params.no_perf;
     cparams.warmup                  = false;
 
@@ -411,7 +412,9 @@ llama_context::llama_context(
             using arena_new_fn_t = void * (*)(ggml_backend_dev_t, size_t);
             using arena_free_fn_t = void (*)(void *);
             using arena_set_compute_fn_t = bool (*)(void *, size_t, size_t);
+            using arena_set_pinned_fn_t = bool (*)(void *, size_t, size_t);
             using arena_buffer_type_fn_t = ggml_backend_buffer_type_t (*)(void *);
+            using arena_pinned_buffer_type_fn_t = ggml_backend_buffer_type_t (*)(void *);
             using graph_reset_fn_t = bool (*)(ggml_backend_t);
 
             ggml_backend_dev_t stream_device = nullptr;
@@ -473,10 +476,26 @@ llama_context::llama_context(
             const uint64_t bootstrap_raw =
                 conversion_bytes + bootstrap_pages*page_bytes;
             kv_stream_minimum_stage_bytes = (bootstrap_raw + 127ULL) & ~127ULL;
-            if (kv_stream_minimum_stage_bytes >= kv_stream_arena_bytes) {
-                throw std::runtime_error(
-                    "block KV streaming arena is too small for bootstrap KV and compute slices");
+
+            // MTP keeps an ordinary KV cache outside the streaming pool. Pin its
+            // space at the top of the arena so the target pool can grow into it
+            // once the MTP cache is ejected.
+            uint64_t kv_stream_pinned_bytes = 0;
+            if (cparams.spec_mtp && hparams.n_layer_nextn > 0) {
+                const uint32_t il_pinned = hparams.n_layer();
+                const uint64_t per_token =
+                    uint64_t(hparams.n_embd_k_gqa(il_pinned) +
+                             hparams.n_embd_v_gqa(il_pinned)) * ggml_type_size(GGML_TYPE_F16);
+                kv_stream_pinned_bytes = per_token*cparams.n_ctx_seq;
+                kv_stream_pinned_bytes = (kv_stream_pinned_bytes + 127ULL) & ~127ULL;
             }
+            if (kv_stream_pinned_bytes >= kv_stream_arena_bytes ||
+                    kv_stream_minimum_stage_bytes >= kv_stream_arena_bytes - kv_stream_pinned_bytes) {
+                throw std::runtime_error(
+                    "block KV streaming arena is too small for the MTP cache and bootstrap KV");
+            }
+            const uint64_t kv_stream_effective_arena_bytes =
+                kv_stream_arena_bytes - kv_stream_pinned_bytes;
 
             auto reg = ggml_backend_dev_backend_reg(stream_device);
             auto arena_new_fn = (arena_new_fn_t) ggml_backend_reg_get_proc_address(
@@ -485,12 +504,18 @@ llama_context::llama_context(
                 reg, "ggml_backend_cuda_phase_arena_free");
             auto arena_set_compute_fn = (arena_set_compute_fn_t) ggml_backend_reg_get_proc_address(
                 reg, "ggml_backend_cuda_phase_arena_set_compute");
+            auto arena_set_pinned_fn = (arena_set_pinned_fn_t) ggml_backend_reg_get_proc_address(
+                reg, "ggml_backend_cuda_phase_arena_set_pinned");
             auto arena_buffer_type_fn = (arena_buffer_type_fn_t) ggml_backend_reg_get_proc_address(
                 reg, "ggml_backend_cuda_phase_arena_buffer_type");
+            auto arena_pinned_buffer_type_fn = (arena_pinned_buffer_type_fn_t)
+                ggml_backend_reg_get_proc_address(
+                    reg, "ggml_backend_cuda_phase_arena_pinned_buffer_type");
             auto graph_reset_fn = (graph_reset_fn_t) ggml_backend_reg_get_proc_address(
                 reg, "ggml_backend_cuda_graph_reset");
             if (arena_new_fn == nullptr || arena_free_fn == nullptr ||
-                    arena_set_compute_fn == nullptr || arena_buffer_type_fn == nullptr ||
+                    arena_set_compute_fn == nullptr || arena_set_pinned_fn == nullptr ||
+                    arena_buffer_type_fn == nullptr || arena_pinned_buffer_type_fn == nullptr ||
                     graph_reset_fn == nullptr) {
                 throw std::runtime_error("block KV streaming phase arena is unavailable");
             }
@@ -499,10 +524,12 @@ llama_context::llama_context(
                 stream_device, kv_stream_arena_bytes);
             kv_stream_phase_arena.free_fn = arena_free_fn;
             kv_stream_phase_arena.set_compute_fn = arena_set_compute_fn;
+            kv_stream_phase_arena.set_pinned_fn = arena_set_pinned_fn;
             kv_stream_phase_arena.buffer_type_fn = arena_buffer_type_fn;
+            kv_stream_phase_arena.pinned_buffer_type_fn = arena_pinned_buffer_type_fn;
             kv_stream_phase_arena.graph_reset_fn = graph_reset_fn;
             kv_stream_phase_arena.device = stream_device;
-            kv_stream_phase_arena.arena_bytes = kv_stream_arena_bytes;
+            kv_stream_phase_arena.arena_bytes = kv_stream_effective_arena_bytes;
             kv_stream_phase_arena.page_bytes = page_bytes;
             kv_stream_phase_arena.conversion_bytes = conversion_bytes;
             kv_stream_phase_arena.layer_count = layer_count;
@@ -510,14 +537,27 @@ llama_context::llama_context(
             kv_stream_phase_arena.current_compute_offset =
                 kv_stream_minimum_stage_bytes;
             kv_stream_phase_arena.current_compute_bytes =
-                kv_stream_arena_bytes - kv_stream_minimum_stage_bytes;
+                kv_stream_effective_arena_bytes - kv_stream_minimum_stage_bytes;
             kv_stream_phase_arena.current_ring_slots =
                 kv_stream_phase_arena.minimum_ring_slots;
-            if (kv_stream_phase_arena.arena == nullptr ||
-                    !arena_set_compute_fn(
+            if (kv_stream_phase_arena.arena == nullptr) {
+                throw std::runtime_error("failed to create CUDA block KV streaming phase arena");
+            }
+            if (kv_stream_pinned_bytes != 0) {
+                if (!arena_set_pinned_fn(
                         kv_stream_phase_arena.arena,
-                        kv_stream_minimum_stage_bytes,
-                        kv_stream_arena_bytes - kv_stream_minimum_stage_bytes)) {
+                        kv_stream_arena_bytes - kv_stream_pinned_bytes,
+                        kv_stream_pinned_bytes)) {
+                    throw std::runtime_error("failed to pin the MTP KV region in the phase arena");
+                }
+                kv_stream_phase_arena.pinned_buffer_type =
+                    arena_pinned_buffer_type_fn(kv_stream_phase_arena.arena);
+                kv_stream_phase_arena.pinned_bytes = kv_stream_pinned_bytes;
+            }
+            if (!arena_set_compute_fn(
+                    kv_stream_phase_arena.arena,
+                    kv_stream_minimum_stage_bytes,
+                    kv_stream_effective_arena_bytes - kv_stream_minimum_stage_bytes)) {
                 throw std::runtime_error("failed to create CUDA block KV streaming phase arena");
             }
             kv_stream_phase_arena.buffer_type =
@@ -537,10 +577,14 @@ llama_context::llama_context(
             /*.type_v                =*/ params.type_v,
             /*.kv_stream_stage_bytes =*/ kv_stream_stage_bytes,
             /*.kv_stream_phase_arena =*/ kv_stream_phase_arena.arena,
-            /*.kv_stream_maximum_pool_bytes =*/ kv_stream_arena_bytes,
+            /*.kv_stream_maximum_pool_bytes =*/ kv_stream_phase_arena.arena_bytes,
             /*.swa_full              =*/ params.swa_full,
             /*.ctx_type              =*/ cparams.ctx_type,
             /*.mem_other             =*/ llama_get_memory(cparams.ctx_other),
+            /*.kv_secondary_buft    =*/ cparams.ctx_type == LLAMA_CONTEXT_TYPE_MTP &&
+                                        params.ctx_other != nullptr
+                                            ? params.ctx_other->kv_stream_phase_arena.pinned_buffer_type
+                                            : nullptr,
         };
 
         memory.reset(model.create_memory(params_mem, cparams));
@@ -4129,6 +4173,7 @@ llama_context_params llama_context_default_params() {
         /*.type_v                      =*/ GGML_TYPE_F16,
         /*.kv_stream_arena_mib         =*/ 0,
         /*.n_max_spec_draft            =*/ 0,
+        /*.spec_mtp                   =*/ false,
         /*.abort_callback              =*/ nullptr,
         /*.abort_callback_data         =*/ nullptr,
         /*.embeddings                  =*/ false,

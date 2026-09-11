@@ -84,7 +84,8 @@ llama_kv_cache::llama_kv_cache(
              const char *   name_tag,
                      size_t kv_stream_stage_bytes,
                       void * kv_stream_phase_arena,
-                     size_t kv_stream_maximum_pool_bytes) :
+                     size_t kv_stream_maximum_pool_bytes,
+    ggml_backend_buffer_type_t kv_secondary_buft) :
     model(model), hparams(hparams), v_trans(v_trans),
     n_seq_max(n_seq_max), n_stream(unified ? 1 : n_seq_max), n_pad(n_pad), n_swa(n_swa), swa_type(swa_type),
     other(static_cast<llama_kv_cache *>(mem_other)),
@@ -235,7 +236,10 @@ llama_kv_cache::llama_kv_cache(
 
             dev_name = ggml_backend_dev_name(dev);
 
-            if (kv_stream_stage_bytes != 0 && !hparams.no_alloc) {
+            if (kv_secondary_buft != nullptr) {
+                buft = kv_secondary_buft;
+                dev_name = ggml_backend_buft_name(buft);
+            } else if (kv_stream_stage_bytes != 0 && !hparams.no_alloc) {
                 if (kv_stream_dev != nullptr && kv_stream_dev != dev) {
                     throw std::runtime_error("block KV streaming requires every attention layer on one CUDA device");
                 }

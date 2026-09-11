@@ -28,6 +28,9 @@ struct llama_memory_params {
     llama_context_type ctx_type;
 
     llama_memory_t mem_other;
+
+    // optional pre-reserved buffer type for a secondary KV cache (MTP)
+    ggml_backend_buffer_type_t kv_secondary_buft;
 };
 
 enum llama_memory_status {

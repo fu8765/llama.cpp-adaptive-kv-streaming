@@ -44,6 +44,12 @@ GGML_BACKEND_API bool ggml_backend_cuda_phase_arena_set_compute(
     ggml_backend_cuda_phase_arena_t arena, size_t offset, size_t size);
 GGML_BACKEND_API ggml_backend_buffer_type_t ggml_backend_cuda_phase_arena_buffer_type(
     ggml_backend_cuda_phase_arena_t arena);
+GGML_BACKEND_API bool ggml_backend_cuda_phase_arena_set_pinned(
+    ggml_backend_cuda_phase_arena_t arena, size_t offset, size_t size);
+GGML_BACKEND_API void ggml_backend_cuda_phase_arena_reset_pinned(
+    ggml_backend_cuda_phase_arena_t arena);
+GGML_BACKEND_API ggml_backend_buffer_type_t ggml_backend_cuda_phase_arena_pinned_buffer_type(
+    ggml_backend_cuda_phase_arena_t arena);
 
 // conduct allreduce operation between devices
 GGML_BACKEND_API bool ggml_backend_cuda_allreduce_tensor(ggml_backend_t * backends, struct ggml_tensor ** tensors, size_t n_backends);

@@ -736,6 +736,7 @@ struct ggml_backend_cuda_buffer_context {
     int device;
     void * dev_ptr = nullptr;
     ggml_backend_cuda_phase_arena_t arena = nullptr;
+    bool arena_pinned = false;
     std::string name;
 
     ggml_backend_cuda_buffer_context(int device, void * dev_ptr) :
@@ -744,8 +745,8 @@ struct ggml_backend_cuda_buffer_context {
     }
 
     ggml_backend_cuda_buffer_context(
-            int device, void * dev_ptr, ggml_backend_cuda_phase_arena_t arena) :
-        device(device), dev_ptr(dev_ptr), arena(arena),
+            int device, void * dev_ptr, ggml_backend_cuda_phase_arena_t arena, bool arena_pinned = false) :
+        device(device), dev_ptr(dev_ptr), arena(arena), arena_pinned(arena_pinned),
         name(GGML_CUDA_NAME + std::to_string(device)) {
     }
 
@@ -1067,10 +1068,16 @@ struct ggml_backend_cuda_phase_arena {
     bool compute_leased = false;
     size_t kv_size = 0;
     bool kv_leased = false;
+    // fixed region reserved for a secondary cache (e.g. the MTP context).
+    // sits above the compute slice and is never moved by set_compute.
+    size_t pinned_offset = 0;
+    size_t pinned_size = 0;
+    bool pinned_leased = false;
     std::atomic<uint32_t> references{1};
     std::mutex mutex;
     std::string name;
     ggml_backend_buffer_type buffer_type{};
+    ggml_backend_buffer_type pinned_buffer_type{};
 };
 
 static void ggml_backend_cuda_phase_arena_acquire(ggml_backend_cuda_phase_arena_t arena) {
@@ -1090,6 +1097,36 @@ static bool ggml_backend_cuda_phase_arena_bind_kv(
     arena->kv_leased = true;
     ggml_backend_cuda_phase_arena_acquire(arena);
     return true;
+}
+
+bool ggml_backend_cuda_phase_arena_set_pinned(
+        ggml_backend_cuda_phase_arena_t arena, size_t offset, size_t size) {
+    if (arena == nullptr || size == 0 || offset % 128 != 0 ||
+            offset > arena->size || size > arena->size - offset) {
+        return false;
+    }
+    std::lock_guard<std::mutex> lock(arena->mutex);
+    if (arena->pinned_leased) {
+        return false;
+    }
+    if (arena->compute_leased &&
+            offset < arena->compute_offset + arena->compute_size &&
+            arena->compute_offset < offset + size) {
+        return false;
+    }
+    arena->pinned_offset = offset;
+    arena->pinned_size = size;
+    return true;
+}
+
+void ggml_backend_cuda_phase_arena_reset_pinned(ggml_backend_cuda_phase_arena_t arena) {
+    if (arena == nullptr) {
+        return;
+    }
+    std::lock_guard<std::mutex> lock(arena->mutex);
+    GGML_ASSERT(!arena->pinned_leased);
+    arena->pinned_offset = 0;
+    arena->pinned_size = 0;
 }
 
 static bool ggml_backend_cuda_phase_arena_can_resize_kv(
@@ -1140,8 +1177,13 @@ ggml_backend_cuda_buffer_context::~ggml_backend_cuda_buffer_context() {
 
     {
         std::lock_guard<std::mutex> lock(arena->mutex);
-        GGML_ASSERT(arena->compute_leased);
-        arena->compute_leased = false;
+        if (arena_pinned) {
+            GGML_ASSERT(arena->pinned_leased);
+            arena->pinned_leased = false;
+        } else {
+            GGML_ASSERT(arena->compute_leased);
+            arena->compute_leased = false;
+        }
     }
     ggml_backend_cuda_phase_arena_release(arena);
 }
@@ -1188,6 +1230,42 @@ static const ggml_backend_buffer_type_i ggml_backend_cuda_phase_arena_buffer_typ
     /* .is_host          = */ nullptr,
 };
 
+static size_t ggml_backend_cuda_phase_arena_pinned_buffer_type_alignment(
+        ggml_backend_buffer_type_t buft) {
+    GGML_UNUSED(buft);
+    return 128;
+}
+
+static size_t ggml_backend_cuda_phase_arena_pinned_buffer_type_alloc_size(
+        ggml_backend_buffer_type_t buft, const ggml_tensor * tensor) {
+    auto * arena = static_cast<ggml_backend_cuda_phase_arena_t>(buft->context);
+    return ggml_backend_cuda_buffer_type_get_alloc_size_for_device(arena->device, tensor);
+}
+
+static ggml_backend_buffer_t ggml_backend_cuda_phase_arena_pinned_buffer_type_alloc(
+        ggml_backend_buffer_type_t buft, size_t size) {
+    auto * arena = static_cast<ggml_backend_cuda_phase_arena_t>(buft->context);
+    std::lock_guard<std::mutex> lock(arena->mutex);
+    if (size == 0 || arena->pinned_size == 0 || size > arena->pinned_size || arena->pinned_leased) {
+        return nullptr;
+    }
+
+    arena->pinned_leased = true;
+    ggml_backend_cuda_phase_arena_acquire(arena);
+    void * data = static_cast<char *>(arena->data) + arena->pinned_offset;
+    auto * context = new ggml_backend_cuda_buffer_context(arena->device, data, arena, true);
+    return ggml_backend_buffer_init(buft, ggml_backend_cuda_buffer_interface, context, size);
+}
+
+static const ggml_backend_buffer_type_i ggml_backend_cuda_phase_arena_pinned_buffer_type_interface = {
+    /* .get_name         = */ ggml_backend_cuda_phase_arena_buffer_type_get_name,
+    /* .alloc_buffer     = */ ggml_backend_cuda_phase_arena_pinned_buffer_type_alloc,
+    /* .get_alignment    = */ ggml_backend_cuda_phase_arena_pinned_buffer_type_alignment,
+    /* .get_max_size     = */ nullptr,
+    /* .get_alloc_size   = */ ggml_backend_cuda_phase_arena_pinned_buffer_type_alloc_size,
+    /* .is_host          = */ nullptr,
+};
+
 ggml_backend_cuda_phase_arena_t ggml_backend_cuda_phase_arena_new(int device, size_t size) {
     if (device < 0 || device >= ggml_backend_cuda_get_device_count() || size == 0) {
         return nullptr;
@@ -1213,6 +1291,11 @@ ggml_backend_cuda_phase_arena_t ggml_backend_cuda_phase_arena_new(int device, si
         /* .device  = */ ggml_backend_reg_dev_get(ggml_backend_cuda_reg(), device),
         /* .context = */ arena,
     };
+    arena->pinned_buffer_type = {
+        /* .iface   = */ ggml_backend_cuda_phase_arena_pinned_buffer_type_interface,
+        /* .device  = */ ggml_backend_reg_dev_get(ggml_backend_cuda_reg(), device),
+        /* .context = */ arena,
+    };
     return arena;
 }
 
@@ -1235,6 +1318,9 @@ bool ggml_backend_cuda_phase_arena_set_compute(
     if (arena->compute_leased || (arena->kv_leased && offset < arena->kv_size)) {
         return false;
     }
+    if (arena->pinned_size != 0 && offset + size > arena->pinned_offset) {
+        return false;
+    }
     arena->compute_offset = offset;
     arena->compute_size = size;
     return true;
@@ -1243,6 +1329,11 @@ bool ggml_backend_cuda_phase_arena_set_compute(
 ggml_backend_buffer_type_t ggml_backend_cuda_phase_arena_buffer_type(
         ggml_backend_cuda_phase_arena_t arena) {
     return arena == nullptr ? nullptr : &arena->buffer_type;
+}
+
+ggml_backend_buffer_type_t ggml_backend_cuda_phase_arena_pinned_buffer_type(
+        ggml_backend_cuda_phase_arena_t arena) {
+    return arena == nullptr ? nullptr : &arena->pinned_buffer_type;
 }
 
 // Communication context for multi-GPU AllReduce during tensor parallelism.
@@ -6914,6 +7005,24 @@ static void * ggml_backend_cuda_reg_get_proc_address(ggml_backend_reg_t reg, con
     if (strcmp(name, "ggml_backend_cuda_phase_arena_buffer_type") == 0) {
         return (void *) +[](void * arena) -> ggml_backend_buffer_type_t {
             return ggml_backend_cuda_phase_arena_buffer_type(
+                static_cast<ggml_backend_cuda_phase_arena_t>(arena));
+        };
+    }
+    if (strcmp(name, "ggml_backend_cuda_phase_arena_set_pinned") == 0) {
+        return (void *) +[](void * arena, size_t offset, size_t size) -> bool {
+            return ggml_backend_cuda_phase_arena_set_pinned(
+                static_cast<ggml_backend_cuda_phase_arena_t>(arena), offset, size);
+        };
+    }
+    if (strcmp(name, "ggml_backend_cuda_phase_arena_reset_pinned") == 0) {
+        return (void *) +[](void * arena) {
+            ggml_backend_cuda_phase_arena_reset_pinned(
+                static_cast<ggml_backend_cuda_phase_arena_t>(arena));
+        };
+    }
+    if (strcmp(name, "ggml_backend_cuda_phase_arena_pinned_buffer_type") == 0) {
+        return (void *) +[](void * arena) -> ggml_backend_buffer_type_t {
+            return ggml_backend_cuda_phase_arena_pinned_buffer_type(
                 static_cast<ggml_backend_cuda_phase_arena_t>(arena));
         };
     }

@@ -295,10 +295,14 @@ private:
         void * arena = nullptr;
         void (*free_fn)(void *) = nullptr;
         bool (*set_compute_fn)(void *, size_t, size_t) = nullptr;
+        bool (*set_pinned_fn)(void *, size_t, size_t) = nullptr;
         ggml_backend_buffer_type_t (*buffer_type_fn)(void *) = nullptr;
+        ggml_backend_buffer_type_t (*pinned_buffer_type_fn)(void *) = nullptr;
         bool (*graph_reset_fn)(ggml_backend_t) = nullptr;
         ggml_backend_dev_t device = nullptr;
         ggml_backend_buffer_type_t buffer_type = nullptr;
+        ggml_backend_buffer_type_t pinned_buffer_type = nullptr;
+        size_t pinned_bytes = 0;
         size_t arena_bytes = 0;
         size_t page_bytes = 0;
         size_t conversion_bytes = 0;
