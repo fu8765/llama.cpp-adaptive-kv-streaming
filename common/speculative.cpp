@@ -2535,6 +2535,13 @@ common_speculative_init_result::common_speculative_init_result(
     // the draft context holds as many tokens per sequence as the target context
     cparams.n_ctx = llama_n_ctx(ctx_tgt);
 
+    if (spec_mtp) {
+        // keep n_batch for the prefill catch-up decode, but cap n_ubatch so
+        // the compute graph stays small (the draft head runs few tokens)
+        const uint32_t n_ubatch_dft = std::max(8u, (uint32_t) params.speculative.draft.n_max + 2u) * cparams.n_seq_max;
+        cparams.n_ubatch = std::min(cparams.n_ubatch, n_ubatch_dft);
+    }
+
     // note: for small models maybe we can set this to the maximum possible draft from all speculative types
     //       the extra memory for small models is likely negligible?
     cparams.n_rs_seq  = 0;
