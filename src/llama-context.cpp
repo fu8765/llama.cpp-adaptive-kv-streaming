@@ -95,7 +95,7 @@ uint64_t llama_context::kv_stream_pinned_bytes_for(bool mtp_active) const {
         const uint32_t il = hparams.n_layer();
         const uint64_t per_token =
             uint64_t(hparams.n_embd_k_gqa(il) + hparams.n_embd_v_gqa(il))*ggml_type_size(GGML_TYPE_F16);
-        pinned += (per_token*cparams.n_ctx_seq + 127ULL) & ~127ULL;
+        pinned += (per_token*spec_mtp_kv_tokens + 127ULL) & ~127ULL;
     }
     if (mtp_active) {
         pinned += (cparams.mtp_weights_bytes + 127ULL) & ~127ULL;
@@ -161,6 +161,8 @@ llama_context::llama_context(
     cparams.n_max_spec_draft        = params.n_max_spec_draft;
     cparams.spec_mtp                = params.spec_mtp;
     cparams.mtp_weights_bytes       = params.mtp_weights_bytes;
+    cparams.kv_stream_mtp_kv_pages  = params.kv_stream_mtp_kv_pages;
+    cparams.kv_stream_mtp_dynamic   = params.kv_stream_mtp_dynamic;
     cparams.no_perf                 = params.no_perf;
     cparams.warmup                  = false;
 
@@ -431,6 +433,14 @@ llama_context::llama_context(
         spec_n_rs_seq         = cparams.n_rs_seq;
         spec_n_max_spec_draft = cparams.n_max_spec_draft;
 
+        // the MTP KV pin defaults to the full context; an explicit page count
+        // caps it, the dynamic controller sizes it to the decode window later
+        spec_mtp_kv_tokens = cparams.n_ctx_seq;
+        if (spec_mtp_configured && cparams.kv_stream_mtp_kv_pages > 0) {
+            const uint64_t kv_tokens = uint64_t(cparams.kv_stream_mtp_kv_pages)*256ULL;
+            spec_mtp_kv_tokens = (uint32_t) std::min<uint64_t>(cparams.n_ctx_seq, kv_tokens);
+        }
+
         const uint64_t kv_stream_arena_bytes = uint64_t(cparams.kv_stream_arena_mib)*1024ULL*1024ULL;
         uint64_t kv_stream_stage_bytes = kv_stream_arena_bytes;
         uint64_t kv_stream_minimum_stage_bytes = 0;
@@ -697,6 +707,9 @@ llama_context::llama_context(
         }
 
         sched_reserve();
+
+        // the MTP KV pin can only be sized after the slabs are measured
+        kv_stream_mtp_kv_cap_apply();
 
         if (!cparams.flash_attn) {
             if (ggml_is_quantized(params.type_v)) {
@@ -1300,7 +1313,130 @@ bool llama_context::kv_stream_get_status(llama_kv_stream_status * status) const 
     status->mtp_reserved_bytes = spec_mtp_configured
         ? kv_stream_pinned_bytes_for(true) - kv_stream_pinned_bytes_for(false)
         : 0;
+    status->mtp_kv_pages = spec_mtp_configured ? spec_mtp_kv_tokens/256 : 0;
 
+    return true;
+}
+
+bool llama_context::kv_stream_mtp_kv_cap_apply() {
+    auto & arena = kv_stream_phase_arena;
+
+    // only the dynamic controller may run MTP past the decode capacity, so only
+    // it can pin the MTP KV to the decode window
+    if (!arena.configured || !spec_mtp_configured ||
+            !cparams.kv_stream_mtp_dynamic || cparams.kv_stream_mtp_kv_pages != 0) {
+        return false;
+    }
+    if (model.hparams.n_layer_nextn == 0) {
+        return false;
+    }
+
+    const uint32_t c0 = cparams.n_ctx_seq/256;
+    if (c0 < 2) {
+        return false;
+    }
+
+    auto * hybrid = dynamic_cast<llama_memory_hybrid *>(memory.get());
+    if (hybrid == nullptr || hybrid->get_mem_recr() == nullptr) {
+        return false;
+    }
+    llama_memory_recurrent * mem_recr = hybrid->get_mem_recr();
+
+    for (uint32_t v : mem_recr->rs_idx) {
+        if (v != 0) {
+            return false;
+        }
+    }
+
+    // pinned page p costs a bytes and frees a/S decode pages, S = bytes per decode page
+    const uint32_t il = model.hparams.n_layer();
+    const uint64_t per_token =
+        uint64_t(model.hparams.n_embd_k_gqa(il) + model.hparams.n_embd_v_gqa(il))*ggml_type_size(GGML_TYPE_F16);
+    const uint64_t a = 256ULL*per_token;
+    const uint64_t S = uint64_t(arena.page_bytes)*arena.layer_count;
+
+    // window(p) = min(r(p), p) with r(p) = r0 + (c0 - p)*a/S; its peak is at r(p) = p
+    const uint64_t r0 = arena.token_generation.resident_pages_per_layer;
+    const uint64_t peak = (r0*S + a*c0)/(S + a);
+
+    if (peak >= c0) {
+        return false;
+    }
+    // one page of headroom for the (1 + n_max) draft verify batch
+    const uint32_t pin = (uint32_t) std::min<uint64_t>(peak + 1, c0);
+    if (pin >= c0) {
+        return false;
+    }
+
+    const uint32_t previous_tokens = spec_mtp_kv_tokens;
+    spec_mtp_kv_tokens = pin*256;
+
+    const uint64_t arena_total = arena.arena_total_bytes;
+    const uint64_t min_stage = arena.minimum_stage_bytes;
+
+    auto repin = [&](uint32_t) -> bool {
+        const uint64_t pinned = kv_stream_pinned_bytes_for(true);
+        if (pinned >= arena_total || min_stage >= arena_total - pinned) {
+            return false;
+        }
+        arena.reset_pinned_fn(arena.arena);
+        if (!arena.set_pinned_fn(arena.arena, arena_total - pinned, pinned)) {
+            return false;
+        }
+        arena.pinned_bytes = pinned;
+        arena.arena_bytes = arena_total - pinned;
+        return true;
+    };
+
+    synchronize();
+    if (sched && !arena.graph_reset_fn(backend_ptrs[arena.backend_index])) {
+        LLAMA_LOG_ERROR("%s: failed to invalidate CUDA graphs before the MTP cap\n", __func__);
+        spec_mtp_kv_tokens = previous_tokens;
+        return false;
+    }
+    gf_res_prev->reset();
+    gf_res_reserve->reset();
+    sched.reset();
+
+    const auto result = mem_recr->rebuild(spec_n_rs_seq, repin);
+
+    auto reserve = [&]() -> bool {
+        sched_need_reserve = true;
+        try {
+            sched_reserve();
+            return true;
+        } catch (const std::exception & e) {
+            LLAMA_LOG_ERROR("%s: failed to re-reserve after the MTP cap: %s\n", __func__, e.what());
+            return false;
+        }
+    };
+
+    switch (result) {
+        case llama_memory_recurrent::REBUILD_OK:
+            break;
+        case llama_memory_recurrent::REBUILD_REFUSED:
+            LLAMA_LOG_ERROR("%s: recurrent rebuild refused, keeping the full MTP pin\n", __func__);
+            spec_mtp_kv_tokens = previous_tokens;
+            reserve();
+            return false;
+        case llama_memory_recurrent::REBUILD_ALLOC_FAILED_RESTORED:
+            // the arena stays pinned to the new value, keep the matching token cap
+            LLAMA_LOG_WARN("%s: MTP cap rebuild failed, previous layout restored\n", __func__);
+            break;
+        case llama_memory_recurrent::REBUILD_ALLOC_FAILED_UNUSABLE:
+            LLAMA_LOG_ERROR("%s: MTP cap failed and the recurrent cache could not be restored; context is unusable\n", __func__);
+            sched_need_reserve = false;
+            return false;
+    }
+
+    if (!reserve()) {
+        return false;
+    }
+
+    LLAMA_LOG_INFO("%s: MTP KV pin = %u pages (%u tokens), decode window = %u pages, pinned = %.2f MiB, arena = %.2f MiB\n", __func__,
+            pin, spec_mtp_kv_tokens,
+            arena.token_generation.resident_pages_per_layer,
+            arena.pinned_bytes/1024.0/1024.0, arena.arena_bytes/1024.0/1024.0);
     return true;
 }
 
@@ -4368,6 +4504,8 @@ llama_context_params llama_context_default_params() {
         /*.n_max_spec_draft            =*/ 0,
         /*.spec_mtp                   =*/ false,
         /*.mtp_weights_bytes          =*/ 0,
+        /*.kv_stream_mtp_kv_pages     =*/ 0,
+        /*.kv_stream_mtp_dynamic      =*/ false,
         /*.abort_callback              =*/ nullptr,
         /*.abort_callback_data         =*/ nullptr,
         /*.embeddings                  =*/ false,

@@ -1772,6 +1772,8 @@ struct llama_context_params common_context_params_to_llama(const common_params &
             cparams.mtp_weights_bytes = size;
         }
     }
+    cparams.kv_stream_mtp_kv_pages = (uint32_t) std::max(0, params.speculative.kv_stream_mtp_kv_pages);
+    cparams.kv_stream_mtp_dynamic  = params.speculative.kv_stream_mtp_dynamic;
 
     return cparams;
 }

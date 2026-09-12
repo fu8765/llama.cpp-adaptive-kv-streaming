@@ -365,6 +365,7 @@ extern "C" {
         uint32_t page_bytes;                 // bytes per KV page
         uint64_t pool_free_bytes;            // controlled pool bytes minus the active working set
         uint64_t mtp_reserved_bytes;         // pinned(true) - pinned(false); 0 when MTP is not configured
+        uint32_t mtp_kv_pages;               // MTP KV pages pin; 0 when MTP is not configured
     };
 
     // NOTE: changing the default values of parameters marked as [EXPERIMENTAL] may cause crashes or incorrect results in certain configurations
@@ -405,6 +406,8 @@ extern "C" {
         uint32_t n_max_spec_draft;    // max speculative draft tokens, 0 = none [EXPERIMENTAL]
         bool     spec_mtp;            // MTP speculative decoding is enabled, shares the KV arena with the target [EXPERIMENTAL]
         size_t   mtp_weights_bytes;   // arena space reserved for the MTP draft weights, 0 = none [EXPERIMENTAL]
+        uint32_t kv_stream_mtp_kv_pages; // pinned MTP KV pages, 0 = pin the MTP-active decode window [EXPERIMENTAL]
+        bool     kv_stream_mtp_dynamic;  // dynamic MTP eject and re-enable is enabled [EXPERIMENTAL]
 
         // Abort callback
         // if it returns true, execution of llama_decode() will be aborted

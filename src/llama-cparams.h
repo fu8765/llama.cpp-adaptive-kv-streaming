@@ -58,6 +58,8 @@ struct llama_cparams {
     uint32_t n_max_spec_draft;
     bool     spec_mtp;
     size_t   mtp_weights_bytes;
+    uint32_t kv_stream_mtp_kv_pages;
+    bool     kv_stream_mtp_dynamic;
 
     std::vector<bool> embeddings_layer_inp; // [n_layer()] extract input embeddings for layer
 

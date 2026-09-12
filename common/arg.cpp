@@ -895,6 +895,12 @@ static bool common_params_parse_ex(int argc, char ** argv, common_params_context
             params.speculative.kv_stream_mtp_reenable_pages, params.speculative.kv_stream_mtp_eject_pages));
     }
 
+    if (!params.speculative.kv_stream_mtp_dynamic && params.speculative.kv_stream_mtp_kv_pages != 0) {
+        throw std::invalid_argument(string_format(
+            "error: --kv-stream-mtp-kv-pages (%d) requires --kv-stream-mtp-dynamic\n",
+            params.speculative.kv_stream_mtp_kv_pages));
+    }
+
     postprocess_cpu_params(params.cpuparams,       nullptr);
     postprocess_cpu_params(params.cpuparams_batch, &params.cpuparams);
 
@@ -4225,6 +4231,16 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
             params.speculative.kv_stream_mtp_stable_decodes = value;
         }
     ).set_spec().set_examples({LLAMA_EXAMPLE_SERVER}).set_env("LLAMA_ARG_KV_STREAM_MTP_STABLE_DECODES"));
+    add_opt(common_arg(
+        {"--kv-stream-mtp-kv-pages"}, "N",
+        string_format("pin the MTP KV region for N decode-window pages (256 tokens each); 0 pins the MTP-active decode window (default: %d)", params.speculative.kv_stream_mtp_kv_pages),
+        [](common_params & params, int value) {
+            if (value < 0) {
+                throw std::invalid_argument("kv-stream MTP KV pages must be non-negative");
+            }
+            params.speculative.kv_stream_mtp_kv_pages = value;
+        }
+    ).set_spec().set_examples({LLAMA_EXAMPLE_SERVER}).set_env("LLAMA_ARG_KV_STREAM_MTP_KV_PAGES"));
     add_opt(common_arg(
         {"--spec-synth-len"}, "L",
         "target mean synthetic acceptance length, including the target token (benchmarking only)",

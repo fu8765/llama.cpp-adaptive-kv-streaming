@@ -2536,6 +2536,15 @@ common_speculative_init_result::common_speculative_init_result(
     cparams.n_ctx = llama_n_ctx(ctx_tgt);
 
     if (spec_mtp) {
+        // when the target pins the MTP KV to a decode window, cap the draft
+        // context to that region or its KV would outgrow the pin
+        llama_kv_stream_status st = {};
+        if (llama_kv_stream_get_status(ctx_tgt, &st) && st.enabled && st.mtp_kv_pages > 0) {
+            cparams.n_ctx = (uint32_t) std::min<uint64_t>(cparams.n_ctx, uint64_t(st.mtp_kv_pages)*256ULL);
+        }
+    }
+
+    if (spec_mtp) {
         // keep n_batch for the prefill catch-up decode, but cap n_ubatch so
         // the compute graph stays small (the draft head runs few tokens)
         const uint32_t n_ubatch_dft = std::max(8u, (uint32_t) params.speculative.draft.n_max + 2u) * cparams.n_seq_max;

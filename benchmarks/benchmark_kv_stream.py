@@ -107,6 +107,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--cache-type-k", default="q8_0")
     parser.add_argument("--cache-type-v", default="q4_0")
     parser.add_argument(
+        "--spec-type", default="none",
+        help="speculative decoding type passed to the server, e.g. draft-mtp, ngram-mod",
+    )
+    parser.add_argument("--spec-draft-n-max", type=int, default=3)
+    parser.add_argument("--spec-draft-p-min", type=float, default=0.0)
+    parser.add_argument(
         "--probe-arena-mib", "--probe-pool-mib",
         dest="probe_arena_mib", type=int, default=1536,
         help="initial total-arena size used to measure remaining VRAM",
@@ -292,6 +298,12 @@ def server_command(
         str(args.batch_size),
         "-ub",
         str(args.ubatch_size),
+        "--spec-type",
+        str(args.spec_type),
+        "--spec-draft-n-max",
+        str(args.spec_draft_n_max),
+        "--spec-draft-p-min",
+        str(args.spec_draft_p_min),
         "-np",
         "1",
         "--no-mmproj",

@@ -344,8 +344,12 @@ private:
     bool     spec_mtp_configured = false;
     uint32_t spec_n_rs_seq = 0;
     uint32_t spec_n_max_spec_draft = 0;
+    uint32_t spec_mtp_kv_tokens = 0;
 
     uint64_t kv_stream_pinned_bytes_for(bool mtp_active) const;
+
+    // size the MTP KV pin to the decode window; used when dynamic MTP owns the pin
+    bool kv_stream_mtp_kv_cap_apply();
 
     llama_adapter_cvec_ptr  cvec;
     llama_adapter_loras_ptr loras;

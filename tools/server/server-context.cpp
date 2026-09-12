@@ -2874,6 +2874,15 @@ private:
                     mtp_capacity_pages = std::max(mtp_capacity_pages, st.resident_pages_per_layer);
                 }
 
+                // the MTP KV pin bounds the window; reserve a margin for the
+                // catch-up decode that runs until the eject takes effect
+                if (st.mtp_kv_pages > 0) {
+                    const uint32_t per_check = (uint32_t) ((params_base.n_batch + 255)/256);
+                    const uint32_t margin = ((uint32_t) stable_decodes + 1u)*per_check + 1u;
+                    const uint32_t usable = st.mtp_kv_pages > margin ? st.mtp_kv_pages - margin : 1u;
+                    mtp_capacity_pages = std::min(mtp_capacity_pages, usable);
+                }
+
                 const int32_t eject_pages = std::max(0, params_base.speculative.kv_stream_mtp_eject_pages);
                 const bool over_capacity = mtp_capacity_pages > 0 &&
                     (int64_t) st.active_pages + eject_pages > (int64_t) mtp_capacity_pages;
