@@ -2920,9 +2920,13 @@ private:
             llama_set_embeddings_nextn(ctx_tgt, false, false);
             return false;
         }
-        if (!spec_create()) {
-            llama_kv_stream_mtp_set(ctx_tgt, false);
+        // spec_create() can return true with a null spec/ctx_dft when the
+        // speculative init fails; treat that as a failed re-enable
+        if (!spec_create() || spec == nullptr || ctx_dft == nullptr) {
+            spec_destroy();
             llama_set_embeddings_nextn(ctx_tgt, false, false);
+            llama_kv_stream_mtp_set(ctx_tgt, false);
+            mtp_stable = 0;
             return false;
         }
         // n_rs_seq changed with the toggle; keep the target removal type in step
