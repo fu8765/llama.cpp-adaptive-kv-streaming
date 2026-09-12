@@ -888,7 +888,8 @@ static bool common_params_parse_ex(int argc, char ** argv, common_params_context
     // parse all CLI args now, so that -hf is available below for remote preset resolution
     parse_cli_args();
 
-    if (params.speculative.kv_stream_mtp_reenable_pages <= params.speculative.kv_stream_mtp_eject_pages) {
+    if (params.speculative.kv_stream_mtp_dynamic &&
+            params.speculative.kv_stream_mtp_reenable_pages <= params.speculative.kv_stream_mtp_eject_pages) {
         throw std::invalid_argument(string_format(
             "error: --kv-stream-mtp-reenable-pages (%d) must be greater than --kv-stream-mtp-eject-pages (%d)\n",
             params.speculative.kv_stream_mtp_reenable_pages, params.speculative.kv_stream_mtp_eject_pages));
@@ -4189,7 +4190,7 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
     ).set_spec().set_examples({LLAMA_EXAMPLE_SPECULATIVE, LLAMA_EXAMPLE_LOOKUP, LLAMA_EXAMPLE_SERVER, LLAMA_EXAMPLE_CLI}).set_env("LLAMA_ARG_SPEC_DRAFT_N_MIN"));
     add_opt(common_arg(
         {"--kv-stream-mtp-dynamic"},
-        string_format("eject MTP when the KV pool streams and re-enable it when it fits again (default: %s)", params.speculative.kv_stream_mtp_dynamic ? "enabled" : "disabled"),
+        string_format("eject MTP when the KV pool streams or the active pages exceed the MTP-active decode capacity, and re-enable it when it fits again (default: %s)", params.speculative.kv_stream_mtp_dynamic ? "enabled" : "disabled"),
         [](common_params & params) {
             params.speculative.kv_stream_mtp_dynamic = true;
         }

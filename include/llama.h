@@ -359,6 +359,7 @@ extern "C" {
         bool     streaming;                  // active pages exceed resident pages
         uint32_t active_pages;               // active KV pages per layer
         uint32_t resident_pages_per_layer;   // resident pages per layer
+        uint32_t decode_resident_pages_per_layer; // MTP-active token-generation decode capacity, pages/layer
         uint32_t ring_slots;                 // ring/staging slots
         uint32_t layer_count;                // streaming attention layers
         uint32_t page_bytes;                 // bytes per KV page

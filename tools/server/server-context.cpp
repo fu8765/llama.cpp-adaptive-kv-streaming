@@ -250,7 +250,7 @@ struct server_slot {
     mtmd::batch_ptr mbatch = nullptr;
 
     // speculative decoding
-    common_speculative * spec;
+    common_speculative * spec = nullptr;
 
     llama_tokens spec_draft;
     llama_tokens spec_prompt;
@@ -1101,6 +1101,19 @@ private:
                                         COMMON_SPECULATIVE_TYPE_DRAFT_MTP) != params_base.speculative.types.end();
         const bool has_spec = has_draft || spec_mtp;
         spec_mtp_enabled_dynamic = spec_mtp;
+        const bool has_other_spec = std::any_of(params_base.speculative.types.begin(),
+            params_base.speculative.types.end(),
+            [](common_speculative_type t) {
+                return t != COMMON_SPECULATIVE_TYPE_NONE && t != COMMON_SPECULATIVE_TYPE_DRAFT_MTP;
+            });
+        if (params_base.speculative.kv_stream_mtp_dynamic && spec_mtp && has_other_spec) {
+            SRV_WRN("%s", "dynamic MTP ejection requires MTP to be the only speculative type, disabling\n");
+            spec_mtp_enabled_dynamic = false;
+        }
+
+        mtp_ejected = false;
+        mtp_stable = 0;
+        mtp_capacity_pages = 0;
 
         if (callback_state) {
             std::vector<std::string> stages = {"text_model"};
@@ -1197,7 +1210,7 @@ private:
 
         add_bos_token = llama_vocab_get_add_bos(vocab);
 
-        // note: has_spec reads this value inside spec_create()
+        // note: spec_create() reads this value
         ctx_tgt_seq_rm_type = common_context_can_seq_rm(ctx_tgt);
         if (ctx_tgt_seq_rm_type == COMMON_CONTEXT_SEQ_RM_TYPE_NO) {
             SRV_WRN("%s", "speculative decoding not supported by this context\n");
@@ -1366,6 +1379,15 @@ private:
         }
 
         spec_rewire_slots(true);
+
+        if (spec_mtp_enabled_dynamic && params_base.speculative.kv_stream_mtp_dynamic) {
+            llama_kv_stream_status st = {};
+            if (llama_kv_stream_get_status(ctx_tgt, &st) && st.enabled) {
+                // seed the capacity before any decode, so a prompt that streams
+                // during prefill can eject at onset
+                mtp_capacity_pages = st.decode_resident_pages_per_layer;
+            }
+        }
 
         {
             const char * LLAMA_TRACE = getenv("LLAMA_TRACE");
@@ -2835,56 +2857,65 @@ private:
         if (!spec_mtp_enabled_dynamic || ctx_tgt == nullptr) {
             return;
         }
-        // only generation observations drive the controller: a prompt batch has a
-        // small resident capacity (large compute slab) and would corrupt the capture
-        if (!mtp_last_batch_generation) {
-            mtp_stable = 0;
-            return;
-        }
 
-        llama_kv_stream_status st = {};
-        if (!llama_kv_stream_get_status(ctx_tgt, &st) || !st.enabled) {
-            return;
-        }
+        try {
+            llama_kv_stream_status st = {};
+            if (!llama_kv_stream_get_status(ctx_tgt, &st) || !st.enabled) {
+                return;
+            }
 
-        const uint32_t stable_decodes = (uint32_t) std::max(1, params_base.speculative.kv_stream_mtp_stable_decodes);
+            const uint32_t stable_decodes = (uint32_t) std::max(1, params_base.speculative.kv_stream_mtp_stable_decodes);
 
-        if (!mtp_ejected) {
-            // running max over generation batches only; prefill never updates it
-            mtp_capacity_pages = std::max(mtp_capacity_pages, st.resident_pages_per_layer);
+            if (!mtp_ejected) {
+                // the phase plan reports the MTP-active decode capacity; only
+                // MTP-active generation feedback may raise it
+                mtp_capacity_pages = std::max(mtp_capacity_pages, st.decode_resident_pages_per_layer);
+                if (mtp_last_batch_generation) {
+                    mtp_capacity_pages = std::max(mtp_capacity_pages, st.resident_pages_per_layer);
+                }
 
-            const int32_t eject_pages = std::max(0, params_base.speculative.kv_stream_mtp_eject_pages);
-            if ((int64_t) st.active_pages + eject_pages <= (int64_t) mtp_capacity_pages) {
+                const int32_t eject_pages = std::max(0, params_base.speculative.kv_stream_mtp_eject_pages);
+                const bool over_capacity = mtp_capacity_pages > 0 &&
+                    (int64_t) st.active_pages + eject_pages > (int64_t) mtp_capacity_pages;
+                if (mtp_capacity_pages == 0 || (!st.streaming && !over_capacity)) {
+                    mtp_stable = 0;
+                    return;
+                }
+                if (++mtp_stable < stable_decodes) {
+                    return;
+                }
+                mtp_eject();
+                // reset on both outcomes, so a failed eject waits a full window
+                mtp_stable = 0;
+                return;
+            }
+
+            // re-enable only from decode observations: the MTP-free prefill layout
+            // reports a large resident, so a prefill re-enable would eject again
+            if (!mtp_last_batch_generation) {
+                mtp_stable = 0;
+                return;
+            }
+
+            const int32_t reenable_pages = std::max(0, params_base.speculative.kv_stream_mtp_reenable_pages);
+            if (st.streaming || st.mtp_reserved_bytes == 0 || mtp_capacity_pages == 0 ||
+                    (int64_t) st.active_pages + reenable_pages > (int64_t) mtp_capacity_pages) {
                 mtp_stable = 0;
                 return;
             }
             if (++mtp_stable < stable_decodes) {
                 return;
             }
-            if (mtp_eject()) {
+            if (!mtp_enable()) {
+                // transient; wait another full stable window before retrying
                 mtp_stable = 0;
+                return;
             }
-            return;
-        }
-
-        if (st.mtp_reserved_bytes == 0) {
             mtp_stable = 0;
-            return;
-        }
-        const int32_t reenable_pages = std::max(0, params_base.speculative.kv_stream_mtp_reenable_pages);
-        if (mtp_capacity_pages == 0 || (int64_t) st.active_pages + reenable_pages > (int64_t) mtp_capacity_pages) {
+        } catch (const std::exception & e) {
+            SRV_ERR("dynamic MTP update failed: %s\n", e.what());
             mtp_stable = 0;
-            return;
         }
-        if (++mtp_stable < stable_decodes) {
-            return;
-        }
-        if (!mtp_enable()) {
-            // transient; wait another full stable window before retrying
-            mtp_stable = 0;
-            return;
-        }
-        mtp_stable = 0;
     }
 
     bool mtp_eject() {
@@ -2893,18 +2924,12 @@ private:
             return false;
         }
 
-        for (auto & slot : slots) {
-            slot.spec_draft.clear();
-            slot.spec_i_batch.clear();
-            slot.spec_ckpt.clear();
-            slot.spec_is_replay = false;
-            slot.spec_prompt.clear();
-        }
-
         spec_destroy();
+        // rewire before the arena toggle, so the slots never reference the freed
+        // spec/ctx_dft
+        spec_rewire_slots(false);
         llama_set_embeddings_nextn(ctx_tgt, false, false);
         const bool toggled = llama_kv_stream_mtp_set(ctx_tgt, false);
-        spec_rewire_slots(false);
         if (!toggled) {
             return false;
         }
@@ -2925,9 +2950,15 @@ private:
             llama_set_embeddings_nextn(ctx_tgt, false, false);
             return false;
         }
-        // spec_create() can return true with a null spec/ctx_dft when the
-        // speculative init fails; treat that as a failed re-enable
-        if (!spec_create() || spec == nullptr || ctx_dft == nullptr) {
+        // spec_create() can throw and can return true with a null spec/ctx_dft;
+        // treat both as a failed re-enable and roll the toggle back
+        bool created = false;
+        try {
+            created = spec_create() && spec != nullptr && ctx_dft != nullptr;
+        } catch (const std::exception & e) {
+            SRV_ERR("failed to create MTP context: %s\n", e.what());
+        }
+        if (!created) {
             spec_destroy();
             llama_set_embeddings_nextn(ctx_tgt, false, false);
             llama_kv_stream_mtp_set(ctx_tgt, false);

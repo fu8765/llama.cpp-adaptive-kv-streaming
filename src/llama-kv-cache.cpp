@@ -292,9 +292,6 @@ llama_kv_cache::llama_kv_cache(
                     auto * resize_pool_fn = (kv_stream_runtime_owner::resize_pool_fn_t)
                         ggml_backend_reg_get_proc_address(
                             reg, "ggml_backend_cuda_kv_stream_resize_pool");
-                    auto * pool_bytes_fn = (size_t (*)(void *))
-                        ggml_backend_reg_get_proc_address(
-                            reg, "ggml_backend_cuda_kv_stream_pool_bytes");
 
                     if (type_pair_supported_fn == nullptr || page_bytes_fn == nullptr ||
                             workspace_bytes_fn == nullptr || runtime_new_fn == nullptr ||
@@ -305,7 +302,7 @@ llama_kv_cache::llama_kv_cache(
                             repartition_fn == nullptr || decode_layout_fn == nullptr ||
                             reconfigure_fn == nullptr ||
                             mark_dirty_rows_fn == nullptr ||
-                            resize_pool_fn == nullptr || pool_bytes_fn == nullptr) {
+                            resize_pool_fn == nullptr) {
                         throw std::runtime_error("block KV streaming requires the CUDA backend");
                     }
 
@@ -345,7 +342,6 @@ llama_kv_cache::llama_kv_cache(
                     kv_stream_runtime.decode_layout_fn = decode_layout_fn;
                     kv_stream_runtime.mark_dirty_rows_fn = mark_dirty_rows_fn;
                     kv_stream_runtime.resize_pool_fn = resize_pool_fn;
-                    kv_stream_runtime.pool_bytes_fn = pool_bytes_fn;
                     kv_stream_runtime.layer_count = kv_stream_layer_count;
                     kv_stream_runtime.page_bytes = page_bytes;
                     if (kv_stream_runtime.runtime == nullptr) {

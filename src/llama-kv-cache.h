@@ -325,7 +325,6 @@ private:
         decode_layout_fn_t decode_layout_fn = nullptr;
         mark_dirty_rows_fn_t mark_dirty_rows_fn = nullptr;
         resize_pool_fn_t resize_pool_fn = nullptr;
-        size_t (*pool_bytes_fn)(void *) = nullptr;
         uint32_t layer_count = 0;
         uint32_t minimum_ring_slots = 0;
         uint32_t decode_layout_pages = 0;

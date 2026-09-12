@@ -1292,6 +1292,7 @@ bool llama_context::kv_stream_get_status(llama_kv_stream_status * status) const 
     status->streaming = kv->kv_stream_streaming();
     status->active_pages = kv->kv_stream_active_pages();
     status->resident_pages_per_layer = kv->kv_stream_resident_pages();
+    status->decode_resident_pages_per_layer = kv_stream_phase_arena.token_generation.resident_pages_per_layer;
     status->ring_slots = kv->kv_stream_ring_slots();
     status->layer_count = kv->kv_stream_layer_count();
     status->page_bytes = kv->kv_stream_page_bytes();
@@ -5074,5 +5075,15 @@ bool llama_kv_stream_mtp_set(llama_context * ctx, bool mtp_active) {
 }
 
 bool llama_kv_stream_get_status(llama_context * ctx, llama_kv_stream_status * status) {
-    return ctx->kv_stream_get_status(status);
+    if (ctx == nullptr || status == nullptr) {
+        return false;
+    }
+    *status = {};
+    try {
+        return ctx->kv_stream_get_status(status);
+    } catch (const std::exception & e) {
+        LLAMA_LOG_ERROR("%s: exception during status query: %s\n", __func__, e.what());
+        *status = {};
+        return false;
+    }
 }
