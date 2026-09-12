@@ -888,6 +888,12 @@ static bool common_params_parse_ex(int argc, char ** argv, common_params_context
     // parse all CLI args now, so that -hf is available below for remote preset resolution
     parse_cli_args();
 
+    if (params.speculative.kv_stream_mtp_reenable_mib <= params.speculative.kv_stream_mtp_eject_mib) {
+        throw std::invalid_argument(string_format(
+            "error: --kv-stream-mtp-reenable-mib (%d) must be greater than --kv-stream-mtp-eject-mib (%d)\n",
+            params.speculative.kv_stream_mtp_reenable_mib, params.speculative.kv_stream_mtp_eject_mib));
+    }
+
     postprocess_cpu_params(params.cpuparams,       nullptr);
     postprocess_cpu_params(params.cpuparams_batch, &params.cpuparams);
 
@@ -4190,7 +4196,7 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
     ).set_spec().set_examples({LLAMA_EXAMPLE_SERVER}).set_env("LLAMA_ARG_KV_STREAM_MTP_DYNAMIC"));
     add_opt(common_arg(
         {"--kv-stream-mtp-eject-mib"}, "N",
-        string_format("free pool MiB at or below which MTP is ejected (default: %d)", params.speculative.kv_stream_mtp_eject_mib),
+        string_format("MTP-active free pool MiB at or below which MTP is ejected (default: %d)", params.speculative.kv_stream_mtp_eject_mib),
         [](common_params & params, int value) {
             if (value < 0) {
                 throw std::invalid_argument("kv-stream MTP eject MiB must be non-negative");
@@ -4199,15 +4205,15 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
         }
     ).set_spec().set_examples({LLAMA_EXAMPLE_SERVER}).set_env("LLAMA_ARG_KV_STREAM_MTP_EJECT_MIB"));
     add_opt(common_arg(
-        {"--kv-stream-mtp-reenable-pages"}, "N",
-        string_format("resident-page headroom required to re-enable MTP (default: %d)", params.speculative.kv_stream_mtp_reenable_pages),
+        {"--kv-stream-mtp-reenable-mib"}, "N",
+        string_format("projected MTP-active free pool MiB required to re-enable MTP (default: %d)", params.speculative.kv_stream_mtp_reenable_mib),
         [](common_params & params, int value) {
             if (value < 0) {
-                throw std::invalid_argument("kv-stream MTP re-enable pages must be non-negative");
+                throw std::invalid_argument("kv-stream MTP re-enable MiB must be non-negative");
             }
-            params.speculative.kv_stream_mtp_reenable_pages = value;
+            params.speculative.kv_stream_mtp_reenable_mib = value;
         }
-    ).set_spec().set_examples({LLAMA_EXAMPLE_SERVER}).set_env("LLAMA_ARG_KV_STREAM_MTP_REENABLE_PAGES"));
+    ).set_spec().set_examples({LLAMA_EXAMPLE_SERVER}).set_env("LLAMA_ARG_KV_STREAM_MTP_REENABLE_MIB"));
     add_opt(common_arg(
         {"--kv-stream-mtp-stable-decodes"}, "N",
         string_format("consecutive controller checks before a transition (default: %d)", params.speculative.kv_stream_mtp_stable_decodes),

@@ -918,7 +918,6 @@ private:
     bool     mtp_ejected = false;
     uint32_t mtp_stable = 0;
     uint32_t mtp_resident_pages_capture = 0;
-    bool     mtp_capture_valid = false;
 
     std::unique_ptr<server_prompt_cache> prompt_cache;
 
@@ -2828,10 +2827,6 @@ private:
     };
 #endif
 
-    static bool streaming_pressure_reached(const llama_kv_stream_status & st, uint64_t eject_bytes) {
-        return st.streaming || st.pool_free_bytes <= eject_bytes;
-    }
-
     void update_mtp_dynamic() {
         if (!params_base.speculative.kv_stream_mtp_dynamic) {
             return;
@@ -2841,25 +2836,35 @@ private:
         }
 
         llama_kv_stream_status st = {};
-        if (!llama_kv_stream_get_status(ctx_tgt, &st) || !st.enabled || st.mtp_reserved_bytes == 0) {
+        if (!llama_kv_stream_get_status(ctx_tgt, &st) || !st.enabled) {
             return;
         }
 
-        // track the largest resident footprint seen while MTP is active, so the
-        // re-enable margin compares against the decode layout, not the prefill slab
+        const uint32_t stable_decodes = (uint32_t) std::max(1, params_base.speculative.kv_stream_mtp_stable_decodes);
+
         if (!mtp_ejected) {
+            // track the largest resident footprint seen while MTP is active; the
+            // decode layout (not the prefill slab) is the capacity to compare against
             mtp_resident_pages_capture = std::max(mtp_resident_pages_capture, st.resident_pages_per_layer);
-            mtp_capture_valid = mtp_resident_pages_capture > 0;
-        }
 
-        const uint64_t eject_bytes = uint64_t(std::max(0, params_base.speculative.kv_stream_mtp_eject_mib))*1024ull*1024ull;
+            const uint64_t eject_bytes = uint64_t(std::max(0, params_base.speculative.kv_stream_mtp_eject_mib))*1024ull*1024ull;
 
-        if (!mtp_ejected) {
-            if (!streaming_pressure_reached(st, eject_bytes)) {
+            // wait until an MTP-active decode layout has been observed
+            if (mtp_resident_pages_capture == 0) {
                 mtp_stable = 0;
                 return;
             }
-            if (++mtp_stable < (uint32_t) std::max(1, params_base.speculative.kv_stream_mtp_stable_decodes)) {
+            // the prefill layout advertises a small resident capacity, so the
+            // free-pool threshold is only meaningful once the decode layout is in
+            // effect; the active pages alone decide whether the set still fits
+            const bool over_capacity = st.active_pages > mtp_resident_pages_capture;
+            const bool pool_pressure = st.resident_pages_per_layer >= mtp_resident_pages_capture &&
+                                       st.pool_free_bytes <= eject_bytes;
+            if (!over_capacity && !pool_pressure) {
+                mtp_stable = 0;
+                return;
+            }
+            if (++mtp_stable < stable_decodes) {
                 return;
             }
             if (mtp_eject()) {
@@ -2868,15 +2873,19 @@ private:
             return;
         }
 
-        if (!mtp_capture_valid) {
-            return;
-        }
-        const int32_t margin = params_base.speculative.kv_stream_mtp_reenable_pages;
-        if ((int64_t) mtp_resident_pages_capture - (int64_t) st.active_pages < margin) {
+        // ejected: re-enable only when the headroom MTP would have if active
+        // (ejected pool free minus the reservation it takes) is large enough
+        const uint64_t reenable_bytes = uint64_t(std::max(0, params_base.speculative.kv_stream_mtp_reenable_mib))*1024ull*1024ull;
+        const uint64_t projected_free = st.pool_free_bytes > st.mtp_reserved_bytes ? st.pool_free_bytes - st.mtp_reserved_bytes : 0;
+        // the ejected pool is much larger than the MTP-active one, so projected_free
+        // alone does not say whether the active set fits; also require the active
+        // pages to sit below the captured MTP-active decode capacity
+        if (st.streaming || st.mtp_reserved_bytes == 0 || projected_free < reenable_bytes ||
+                mtp_resident_pages_capture == 0 || st.active_pages >= mtp_resident_pages_capture) {
             mtp_stable = 0;
             return;
         }
-        if (++mtp_stable < (uint32_t) std::max(1, params_base.speculative.kv_stream_mtp_stable_decodes)) {
+        if (++mtp_stable < stable_decodes) {
             return;
         }
         if (!mtp_enable()) {
@@ -2892,7 +2901,6 @@ private:
         if (!llama_kv_stream_get_status(ctx_tgt, &st)) {
             return false;
         }
-        mtp_capture_valid = mtp_resident_pages_capture > 0;
 
         for (auto & slot : slots) {
             slot.spec_draft.clear();
@@ -2943,7 +2951,6 @@ private:
         spec_rewire_slots(true);
         mtp_ejected = false;
         mtp_resident_pages_capture = 0;
-        mtp_capture_valid = false;
         SRV_INF("%s", "MTP re-enabled\n");
         return true;
     }
