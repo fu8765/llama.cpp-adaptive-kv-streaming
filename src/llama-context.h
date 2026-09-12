@@ -60,6 +60,8 @@ struct llama_context {
     const llama_model   & get_model()   const;
     const llama_cparams & get_cparams() const;
 
+    ggml_backend_buffer_type_t get_kv_stream_pinned_buft() const;
+
     ggml_backend_sched_t get_sched() const;
 
     uint32_t n_ctx()     const;

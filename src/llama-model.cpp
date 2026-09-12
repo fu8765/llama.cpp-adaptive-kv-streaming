@@ -2809,6 +2809,11 @@ int32_t llama_model_n_embd(const llama_model * model) {
     return model->hparams.n_embd;
 }
 
+void llama_model_borrow_output(llama_model * model, const llama_model * other) {
+    model->output   = other->output;
+    model->output_s = other->output_s;
+}
+
 int32_t llama_model_n_embd_inp(const llama_model * model) {
     return model->hparams.n_embd_inp();
 }

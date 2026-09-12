@@ -123,6 +123,7 @@ llama_context::llama_context(
     cparams.kv_stream_arena_mib     = params.kv_stream_arena_mib;
     cparams.n_max_spec_draft        = params.n_max_spec_draft;
     cparams.spec_mtp                = params.spec_mtp;
+    cparams.mtp_weights_bytes       = params.mtp_weights_bytes;
     cparams.no_perf                 = params.no_perf;
     cparams.warmup                  = false;
 
@@ -488,6 +489,11 @@ llama_context::llama_context(
                              hparams.n_embd_v_gqa(il_pinned)) * ggml_type_size(GGML_TYPE_F16);
                 kv_stream_pinned_bytes = per_token*cparams.n_ctx_seq;
                 kv_stream_pinned_bytes = (kv_stream_pinned_bytes + 127ULL) & ~127ULL;
+            }
+            // a standalone MTP draft model weighs its weights into the arena too,
+            // so that ejecting MTP returns both the KV and the weights to the pool
+            if (cparams.spec_mtp) {
+                kv_stream_pinned_bytes += (cparams.mtp_weights_bytes + 127ULL) & ~127ULL;
             }
             if (kv_stream_pinned_bytes >= kv_stream_arena_bytes ||
                     kv_stream_minimum_stage_bytes >= kv_stream_arena_bytes - kv_stream_pinned_bytes) {
@@ -1227,6 +1233,10 @@ const llama_model & llama_context::get_model() const {
 
 const llama_cparams & llama_context::get_cparams() const {
     return cparams;
+}
+
+ggml_backend_buffer_type_t llama_context::get_kv_stream_pinned_buft() const {
+    return kv_stream_phase_arena.pinned_buffer_type;
 }
 
 ggml_backend_sched_t llama_context::get_sched() const {
@@ -4174,6 +4184,7 @@ llama_context_params llama_context_default_params() {
         /*.kv_stream_arena_mib         =*/ 0,
         /*.n_max_spec_draft            =*/ 0,
         /*.spec_mtp                   =*/ false,
+        /*.mtp_weights_bytes          =*/ 0,
         /*.abort_callback              =*/ nullptr,
         /*.abort_callback_data         =*/ nullptr,
         /*.embeddings                  =*/ false,
@@ -4865,4 +4876,8 @@ llama_memory_breakdown llama_get_memory_breakdown(const struct llama_context * c
 
 llama_context * llama_get_ctx_other(struct llama_context * ctx) {
     return ctx->get_cparams().ctx_other;
+}
+
+ggml_backend_buffer_type_t llama_kv_stream_pinned_buft(struct llama_context * ctx) {
+    return ctx->get_kv_stream_pinned_buft();
 }

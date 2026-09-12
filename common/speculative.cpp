@@ -2552,6 +2552,17 @@ common_speculative_init_result::common_speculative_init_result(
         model_path = params.speculative.draft.mparams.path;
         LOG_INF("%s: loading draft model '%s'\n", __func__, model_path.c_str());
 
+        // when the target owns a KV-stream arena, back the draft weights with its
+        // pinned region so that ejecting MTP returns the weights to the pool
+        llama_model_tensor_buft_override dft_overrides[2] = { { ".*", nullptr }, { nullptr, nullptr } };
+        if (spec_mtp) {
+            auto * buft = llama_kv_stream_pinned_buft(ctx_tgt);
+            if (buft != nullptr) {
+                dft_overrides[0].buft = buft;
+                mparams.tensor_buft_overrides = dft_overrides;
+            }
+        }
+
         llama_model * model_dft = llama_model_load_from_file(params.model.path.c_str(), mparams);
         if (model_dft == NULL) {
             LOG_ERR("%s: failed to load draft model, '%s'\n", __func__, model_path.c_str());
@@ -2559,6 +2570,11 @@ common_speculative_init_result::common_speculative_init_result(
         }
 
         pimpl->model.reset(model_dft);
+
+        if (spec_mtp) {
+            // the MTP head is the target LM head - borrow it instead of loading a copy in the draft file
+            llama_model_borrow_output(model_dft, model_tgt);
+        }
 
         llama_context * ctx_dft = llama_init_from_model(model_dft, cparams);
         if (ctx_dft == nullptr) {

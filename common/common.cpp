@@ -1292,6 +1292,11 @@ common_init_result::common_init_result(common_params & params, bool model_only) 
     auto mparams = common_model_params_to_llama(params);
     auto cparams = common_context_params_to_llama(params);
 
+    if (params.speculative.has_dft()) {
+        // the MTP block comes from the separate draft model
+        mparams.load_mtp = false;
+    }
+
     if (params.fit_params && !common_params_should_fit_device_memory(params)) {
         COM_INF("%s", "skipping device-memory auto-fit because a shared KV/compute arena is explicitly configured\n");
     }
@@ -1759,6 +1764,14 @@ struct llama_context_params common_context_params_to_llama(const common_params &
     cparams.spec_mtp = std::find(
         params.speculative.types.begin(), params.speculative.types.end(),
         COMMON_SPECULATIVE_TYPE_DRAFT_MTP) != params.speculative.types.end();
+    cparams.mtp_weights_bytes = 0;
+    if (cparams.spec_mtp && params.speculative.has_dft()) {
+        std::error_code ec;
+        const auto size = std::filesystem::file_size(params.speculative.draft.mparams.path, ec);
+        if (!ec) {
+            cparams.mtp_weights_bytes = size;
+        }
+    }
 
     return cparams;
 }

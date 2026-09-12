@@ -737,6 +737,7 @@ struct ggml_backend_cuda_buffer_context {
     void * dev_ptr = nullptr;
     ggml_backend_cuda_phase_arena_t arena = nullptr;
     bool arena_pinned = false;
+    size_t arena_pinned_size = 0;
     std::string name;
 
     ggml_backend_cuda_buffer_context(int device, void * dev_ptr) :
@@ -1068,11 +1069,13 @@ struct ggml_backend_cuda_phase_arena {
     bool compute_leased = false;
     size_t kv_size = 0;
     bool kv_leased = false;
-    // fixed region reserved for a secondary cache (e.g. the MTP context).
-    // sits above the compute slice and is never moved by set_compute.
+    // fixed region reserved for secondary allocations owned by another context
+    // (e.g. the MTP draft weights and its KV cache). sits above the compute
+    // slice and is never moved by set_compute. handed out with a bump allocator.
     size_t pinned_offset = 0;
     size_t pinned_size = 0;
-    bool pinned_leased = false;
+    size_t pinned_used = 0;
+    uint32_t pinned_refs = 0;
     std::atomic<uint32_t> references{1};
     std::mutex mutex;
     std::string name;
@@ -1106,7 +1109,7 @@ bool ggml_backend_cuda_phase_arena_set_pinned(
         return false;
     }
     std::lock_guard<std::mutex> lock(arena->mutex);
-    if (arena->pinned_leased) {
+    if (arena->pinned_refs != 0) {
         return false;
     }
     if (arena->compute_leased &&
@@ -1116,6 +1119,7 @@ bool ggml_backend_cuda_phase_arena_set_pinned(
     }
     arena->pinned_offset = offset;
     arena->pinned_size = size;
+    arena->pinned_used = 0;
     return true;
 }
 
@@ -1124,9 +1128,10 @@ void ggml_backend_cuda_phase_arena_reset_pinned(ggml_backend_cuda_phase_arena_t 
         return;
     }
     std::lock_guard<std::mutex> lock(arena->mutex);
-    GGML_ASSERT(!arena->pinned_leased);
+    GGML_ASSERT(arena->pinned_refs == 0);
     arena->pinned_offset = 0;
     arena->pinned_size = 0;
+    arena->pinned_used = 0;
 }
 
 static bool ggml_backend_cuda_phase_arena_can_resize_kv(
@@ -1178,8 +1183,9 @@ ggml_backend_cuda_buffer_context::~ggml_backend_cuda_buffer_context() {
     {
         std::lock_guard<std::mutex> lock(arena->mutex);
         if (arena_pinned) {
-            GGML_ASSERT(arena->pinned_leased);
-            arena->pinned_leased = false;
+            GGML_ASSERT(arena->pinned_refs > 0);
+            arena->pinned_refs--;
+            arena->pinned_used -= arena_pinned_size;
         } else {
             GGML_ASSERT(arena->compute_leased);
             arena->compute_leased = false;
@@ -1246,14 +1252,18 @@ static ggml_backend_buffer_t ggml_backend_cuda_phase_arena_pinned_buffer_type_al
         ggml_backend_buffer_type_t buft, size_t size) {
     auto * arena = static_cast<ggml_backend_cuda_phase_arena_t>(buft->context);
     std::lock_guard<std::mutex> lock(arena->mutex);
-    if (size == 0 || arena->pinned_size == 0 || size > arena->pinned_size || arena->pinned_leased) {
+    const size_t aligned = (size + 127ULL) & ~127ULL;
+    if (size == 0 || arena->pinned_size == 0 ||
+            aligned > arena->pinned_size - arena->pinned_used) {
         return nullptr;
     }
 
-    arena->pinned_leased = true;
+    void * data = static_cast<char *>(arena->data) + arena->pinned_offset + arena->pinned_used;
+    arena->pinned_used += aligned;
+    arena->pinned_refs++;
     ggml_backend_cuda_phase_arena_acquire(arena);
-    void * data = static_cast<char *>(arena->data) + arena->pinned_offset;
     auto * context = new ggml_backend_cuda_buffer_context(arena->device, data, arena, true);
+    context->arena_pinned_size = aligned;
     return ggml_backend_buffer_init(buft, ggml_backend_cuda_buffer_interface, context, size);
 }
 

@@ -391,6 +391,7 @@ extern "C" {
         uint32_t kv_stream_arena_mib; // shared CUDA KV + compute arena, 0 = disabled [EXPERIMENTAL]
         uint32_t n_max_spec_draft;    // max speculative draft tokens, 0 = none [EXPERIMENTAL]
         bool     spec_mtp;            // MTP speculative decoding is enabled, shares the KV arena with the target [EXPERIMENTAL]
+        size_t   mtp_weights_bytes;   // arena space reserved for the MTP draft weights, 0 = none [EXPERIMENTAL]
 
         // Abort callback
         // if it returns true, execution of llama_decode() will be aborted
@@ -597,6 +598,12 @@ extern "C" {
     LLAMA_API int32_t llama_model_n_head       (const struct llama_model * model);
     LLAMA_API int32_t llama_model_n_head_kv    (const struct llama_model * model);
     LLAMA_API int32_t llama_model_n_swa        (const struct llama_model * model);
+
+    // share the output (LM head) of another model, e.g. for a standalone MTP draft
+    LLAMA_API void llama_model_borrow_output(struct llama_model * model, const struct llama_model * other);
+
+    // buffer type backing the KV-stream phase arena pinned region of ctx (NULL if none)
+    LLAMA_API ggml_backend_buffer_type_t llama_kv_stream_pinned_buft(struct llama_context * ctx);
 
     // Get the model's RoPE frequency scaling factor
     LLAMA_API float llama_model_rope_freq_scale_train(const struct llama_model * model);
