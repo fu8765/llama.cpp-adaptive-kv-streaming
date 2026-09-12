@@ -80,6 +80,11 @@ public:
 
     void set_rs_idx(llama_seq_id seq_id, uint32_t idx);
 
+    // Reallocate the rollback planes, preserving the committed state (plane 0).
+    // repin() runs between releasing the old buffers and allocating the new ones.
+    bool rebuild(uint32_t n_rs_seq, ggml_backend_buffer_type_t secondary_buft,
+                 const std::function<void()> & repin);
+
     // computed before each graph build
     uint32_t n = 0;
 

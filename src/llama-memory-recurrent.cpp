@@ -98,6 +98,60 @@ void llama_memory_recurrent::alloc_buffers() {
     }
 }
 
+bool llama_memory_recurrent::rebuild(uint32_t n_rs_seq, ggml_backend_buffer_type_t secondary_buft,
+                                     const std::function<void()> & repin) {
+    for (uint32_t v : rs_idx) {
+        if (v != 0) {
+            LLAMA_LOG_ERROR("%s: cannot rebuild with a pending rollback\n", __func__);
+            return false;
+        }
+    }
+
+    const int32_t n_layer = hparams.n_layer();
+    const size_t row_r = hparams.n_embd_r()*ggml_type_size(type_r);
+    const size_t row_s = hparams.n_embd_s()*ggml_type_size(type_s);
+    const size_t row_p = hparams.ple_conv_state()*ggml_type_size(type_r);
+
+    std::vector<std::vector<uint8_t>> stage_r(n_layer), stage_s(n_layer), stage_p(n_layer);
+    for (int i = 0; i < n_layer; i++) {
+        if (r_l[i] == nullptr) {
+            continue;
+        }
+        stage_r[i].resize(row_r*size);
+        ggml_backend_tensor_get(r_l[i], stage_r[i].data(), 0, stage_r[i].size());
+        stage_s[i].resize(row_s*size);
+        ggml_backend_tensor_get(s_l[i], stage_s[i].data(), 0, stage_s[i].size());
+        if (p_l[i] != nullptr) {
+            stage_p[i].resize(row_p*size);
+            ggml_backend_tensor_get(p_l[i], stage_p[i].data(), 0, stage_p[i].size());
+        }
+    }
+
+    this->secondary_buft = secondary_buft;
+    ctxs_bufs.clear();
+    if (repin) {
+        repin();
+    }
+
+    this->n_rs_seq = n_rs_seq;
+    alloc_buffers();
+
+    for (int i = 0; i < n_layer; i++) {
+        if (r_l[i] == nullptr) {
+            continue;
+        }
+        ggml_backend_tensor_set(r_l[i], stage_r[i].data(), 0, stage_r[i].size());
+        ggml_backend_tensor_set(s_l[i], stage_s[i].data(), 0, stage_s[i].size());
+        if (p_l[i] != nullptr) {
+            ggml_backend_tensor_set(p_l[i], stage_p[i].data(), 0, stage_p[i].size());
+        }
+    }
+
+    std::fill(rs_idx.begin(), rs_idx.end(), 0);
+    rs_z = -1;
+    return true;
+}
+
 llama_memory_recurrent::llama_memory_recurrent(
         const llama_model & model,
                 ggml_type   type_r,
