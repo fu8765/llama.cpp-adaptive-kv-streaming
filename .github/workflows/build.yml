@@ -5,7 +5,7 @@ on:
 
 jobs:
   build-windows:
-    runs-on: windows-latest
+    runs-on: windows-2022
 
     steps:
       - name: Checkout repository
@@ -54,6 +54,7 @@ jobs:
             -DGGML_CUDA=ON `
             -DGGML_CUDA_FA_ALL_QUANTS=ON `
             -DCMAKE_CUDA_ARCHITECTURES="120" `
+            -DCMAKE_CUDA_FLAGS="-allow-unsupported-compiler" `
             -DCMAKE_BUILD_TYPE=Release
 
       - name: Build llama-server
@@ -67,7 +68,6 @@ jobs:
       - name: Verify Adaptive KV in compiled binary
         shell: pwsh
         run: |
-          # Add CUDA DLLs to PATH so dynamic library loader finds them
           $env:PATH = "${{ steps.cuda.outputs.CUDA_PATH }}\bin;" + $env:PATH
 
           Write-Host "Latest commit on runner:"
