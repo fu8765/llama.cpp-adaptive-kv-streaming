@@ -65,23 +65,31 @@ jobs:
             --target llama-server `
             -j 4
 
+      - name: Bundle CUDA Runtime DLLs
+        shell: pwsh
+        run: |
+          $targetDir = Get-Item "build\bin", "build\bin\Release" | Where-Object { Test-Path $_ } | Select-Object -First 1
+          $cudaBin = "${{ steps.cuda.outputs.CUDA_PATH }}\bin"
+          
+          Write-Host "Copying CUDA runtime binaries to output directory..."
+          Get-ChildItem -Path $cudaBin -Filter "cudart64_*.dll" | Copy-Item -Destination $targetDir.FullName -Force
+          Get-ChildItem -Path $cudaBin -Filter "cublas*.dll" | Copy-Item -Destination $targetDir.FullName -Force
+
       - name: Verify Adaptive KV in compiled binary
         shell: pwsh
         run: |
-          $env:PATH = "${{ steps.cuda.outputs.CUDA_PATH }}\bin;" + $env:PATH
+          $binDir = (Get-Item "build\bin", "build\bin\Release" | Where-Object { Test-Path $_ } | Select-Object -First 1).FullName
+          $env:PATH = "$binDir;${{ steps.cuda.outputs.CUDA_PATH }}\bin;" + $env:PATH
 
           Write-Host "Latest commit on runner:"
           git log -1 --oneline
 
-          $server = ".\build\bin\llama-server.exe"
-          if (-not (Test-Path $server)) {
-            $server = ".\build\bin\Release\llama-server.exe"
-          }
+          $server = Join-Path $binDir "llama-server.exe"
           if (-not (Test-Path $server)) {
             throw "ERROR: llama-server.exe was not found in build directory."
           }
 
-          $p = Start-Process -FilePath $server -ArgumentList "--help" -NoNewWindow -Wait -PassThru -RedirectStandardOutput "out.txt" -RedirectStandardError "err.txt"
+          $p = Start-Process -FilePath $server -ArgumentList "--help" -WorkingDirectory $binDir -NoNewWindow -Wait -PassThru -RedirectStandardOutput "out.txt" -RedirectStandardError "err.txt"
 
           Write-Host "Process Exit Code: $($p.ExitCode)"
           $out = Get-Content "out.txt" -Raw -ErrorAction SilentlyContinue
@@ -102,19 +110,6 @@ jobs:
           }
 
           Write-Host "SUCCESS: Adaptive KV flag confirmed in compiled binary!"
-
-      - name: Bundle CUDA Runtime DLLs
-        shell: pwsh
-        run: |
-          $targetDir = Get-Item "build\bin", "build\bin\Release" | Where-Object { Test-Path $_ } | Select-Object -First 1
-          $cudaBin = "${{ steps.cuda.outputs.CUDA_PATH }}\bin"
-          
-          Get-ChildItem -Path $cudaBin -Filter "cudart64_*.dll" | ForEach-Object {
-            Copy-Item $_.FullName -Destination $targetDir.FullName -Force
-          }
-          Get-ChildItem -Path $cudaBin -Filter "cublas64_*.dll" | ForEach-Object {
-            Copy-Item $_.FullName -Destination $targetDir.FullName -Force
-          }
 
       - name: Upload Windows Binary Artifact
         uses: actions/upload-artifact@v4
