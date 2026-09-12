@@ -25,7 +25,8 @@ llama_memory_recurrent::llama_memory_recurrent(
                  uint32_t   mem_size,
                  uint32_t   n_seq_max,
                  uint32_t   n_rs_seq,
-    const layer_filter_cb & filter) : hparams(model.hparams), n_seq_max(n_seq_max) {
+    const layer_filter_cb & filter,
+    ggml_backend_buffer_type_t secondary_buft) : hparams(model.hparams), n_seq_max(n_seq_max) {
     const int32_t n_layer = hparams.n_layer();
 
     head = 0;
@@ -89,6 +90,11 @@ llama_memory_recurrent::llama_memory_recurrent(
             buft = ggml_backend_dev_buffer_type(dev);
 
             dev_name = ggml_backend_dev_name(dev);
+        }
+
+        if (secondary_buft != nullptr) {
+            buft = secondary_buft;
+            dev_name = ggml_backend_buft_name(buft);
         }
 
         LLAMA_LOG_DEBUG("%s, layer %3d: dev = %s\n", __func__, i, dev_name);

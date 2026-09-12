@@ -495,6 +495,25 @@ llama_context::llama_context(
             if (cparams.spec_mtp) {
                 kv_stream_pinned_bytes += (cparams.mtp_weights_bytes + 127ULL) & ~127ULL;
             }
+            // the target's recurrent-state cache is otherwise a separate full-length
+            // allocation. Pin it as well when MTP widens it (n_rs_seq > 0), so that a
+            // fixed arena covers it and the ngram case keeps its full pool.
+            if (cparams.spec_mtp) {
+                const uint64_t n_rows =
+                    uint64_t(std::max(1u, cparams.n_seq_max))*(1ULL + cparams.n_rs_seq);
+                uint64_t rs_bytes = 0;
+                for (uint32_t il = 0; il < hparams.n_layer(); ++il) {
+                    if (!hparams.is_recr(il)) {
+                        continue;
+                    }
+                    uint64_t elems = uint64_t(hparams.n_embd_r()) + hparams.n_embd_s();
+                    if (hparams.ple_conv_state() > 0 && hparams.is_ple(il)) {
+                        elems += hparams.ple_conv_state();
+                    }
+                    rs_bytes += n_rows*elems*ggml_type_size(GGML_TYPE_F32);
+                }
+                kv_stream_pinned_bytes += (rs_bytes + 127ULL) & ~127ULL;
+            }
             if (kv_stream_pinned_bytes >= kv_stream_arena_bytes ||
                     kv_stream_minimum_stage_bytes >= kv_stream_arena_bytes - kv_stream_pinned_bytes) {
                 throw std::runtime_error(
@@ -590,6 +609,10 @@ llama_context::llama_context(
             /*.kv_secondary_buft    =*/ cparams.ctx_type == LLAMA_CONTEXT_TYPE_MTP &&
                                         params.ctx_other != nullptr
                                             ? params.ctx_other->kv_stream_phase_arena.pinned_buffer_type
+                                            : nullptr,
+            /*.rs_secondary_buft    =*/ cparams.ctx_type == LLAMA_CONTEXT_TYPE_DEFAULT &&
+                                        cparams.spec_mtp
+                                            ? kv_stream_phase_arena.pinned_buffer_type
                                             : nullptr,
         };
 

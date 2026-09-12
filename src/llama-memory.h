@@ -31,6 +31,9 @@ struct llama_memory_params {
 
     // optional pre-reserved buffer type for a secondary KV cache (MTP)
     ggml_backend_buffer_type_t kv_secondary_buft;
+
+    // optional pre-reserved buffer type for the recurrent-state cache
+    ggml_backend_buffer_type_t rs_secondary_buft;
 };
 
 enum llama_memory_status {

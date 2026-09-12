@@ -2624,7 +2624,8 @@ llama_memory_i * llama_model::create_memory(const llama_memory_params & params, 
                             /* filter_recr       */ std::move(filter_recr),
                             /* kv stream stage   */ arch == LLM_ARCH_QWEN35 ? params.kv_stream_stage_bytes : 0,
                             /* kv stream arena   */ arch == LLM_ARCH_QWEN35 ? params.kv_stream_phase_arena : nullptr,
-                            /* kv stream maximum */ arch == LLM_ARCH_QWEN35 ? params.kv_stream_maximum_pool_bytes : 0);
+                            /* kv stream maximum */ arch == LLM_ARCH_QWEN35 ? params.kv_stream_maximum_pool_bytes : 0,
+                            /* rs secondary buft */ arch == LLM_ARCH_QWEN35 ? params.rs_secondary_buft : nullptr);
                     }
                 } else {
                     llama_kv_cache::layer_filter_cb filter = nullptr;

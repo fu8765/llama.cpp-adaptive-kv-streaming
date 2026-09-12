@@ -32,7 +32,8 @@ llama_memory_hybrid::llama_memory_hybrid(
     const layer_filter_cb & filter_recr,
                      size_t kv_stream_stage_bytes,
                      void * kv_stream_phase_arena,
-                     size_t kv_stream_maximum_pool_bytes) :
+                     size_t kv_stream_maximum_pool_bytes,
+    ggml_backend_buffer_type_t rs_secondary_buft) :
     hparams(model.hparams),
     mem_attn(new llama_kv_cache(
         model,
@@ -68,7 +69,8 @@ llama_memory_hybrid::llama_memory_hybrid(
         n_rs_seq,
         filter_recr == nullptr ?
             [&](int32_t il) { return hparams.is_recr(il); }
-            : filter_recr
+            : filter_recr,
+        rs_secondary_buft
     )) {}
 
 llama_memory_context_ptr llama_memory_hybrid::init_batch(llama_batch_allocr & balloc, uint32_t n_ubatch, bool embd_all) {

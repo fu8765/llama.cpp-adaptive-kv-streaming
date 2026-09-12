@@ -24,7 +24,8 @@ public:
                      uint32_t   mem_size,
                      uint32_t   n_seq_max,
                      uint32_t   n_rs_seq,
-        const layer_filter_cb & filter);
+        const layer_filter_cb & filter,
+    ggml_backend_buffer_type_t secondary_buft = nullptr);
 
     ~llama_memory_recurrent() = default;
 

@@ -42,7 +42,8 @@ public:
     const layer_filter_cb & filter_recr = nullptr,
                      size_t kv_stream_stage_bytes = 0,
                      void * kv_stream_phase_arena = nullptr,
-                     size_t kv_stream_maximum_pool_bytes = 0);
+                     size_t kv_stream_maximum_pool_bytes = 0,
+    ggml_backend_buffer_type_t rs_secondary_buft = nullptr);
 
     ~llama_memory_hybrid() = default;
 
