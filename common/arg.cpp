@@ -4190,7 +4190,7 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
     ).set_spec().set_examples({LLAMA_EXAMPLE_SPECULATIVE, LLAMA_EXAMPLE_LOOKUP, LLAMA_EXAMPLE_SERVER, LLAMA_EXAMPLE_CLI}).set_env("LLAMA_ARG_SPEC_DRAFT_N_MIN"));
     add_opt(common_arg(
         {"--kv-stream-mtp-dynamic"},
-        string_format("eject MTP when the KV pool streams or the active pages exceed the MTP-active decode capacity, and re-enable it when it fits again (default: %s)", params.speculative.kv_stream_mtp_dynamic ? "enabled" : "disabled"),
+        string_format("eject MTP when the active pages reach the MTP-active decode capacity or the KV pool streams, and re-enable it when it fits again; requires MTP to be the only spec type (default: %s)", params.speculative.kv_stream_mtp_dynamic ? "enabled" : "disabled"),
         [](common_params & params) {
             params.speculative.kv_stream_mtp_dynamic = true;
         }
