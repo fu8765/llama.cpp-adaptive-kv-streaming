@@ -10,6 +10,8 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+        with:
+          ref: feature/adaptive-kv-stream
 
       - name: Verify Adaptive KV source
         shell: pwsh
