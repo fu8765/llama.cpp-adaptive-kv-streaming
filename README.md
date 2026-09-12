@@ -57,6 +57,63 @@ memory management for the MTP draft context. Everything below is experimental.
 - `llama_model_borrow_output()` lets a draft model share the target's LM head
   (`output` / `output_s`) instead of carrying a duplicate copy.
 
+## Configuration
+
+### Phase arena (upstream)
+- `--kv-stream-arena-mib N` (alias `--kv-stream-stage-mib`): size of the shared CUDA arena in MiB; `0` disables it. The phase arena requires `--parallel 1`, `--flash-attn on`, KV offload, and a Qwen3.5-family target.
+
+### Speculative decoding
+- `--spec-type draft-mtp`: enable MTP speculative decoding.
+- `-md <file>`: optional separate MTP-only GGUF; the target then skips its embedded MTP tensors (`load_mtp = false`) and the draft borrows the target LM head.
+- `--spec-draft-n-max N`: number of draft tokens. It also widens the target recurrent-state cache and the decode compute slab.
+- `--spec-draft-type-k T` / `--spec-draft-type-v T`: draft KV cache types (default F16). The main `--cache-type-k`/`--cache-type-v` do not affect the draft.
+
+### Dynamic MTP eject (this fork, opt-in)
+- `--kv-stream-mtp-dynamic`: eject MTP when the decode working set exceeds the MTP-active decode capacity, and re-enable it when it fits again (default: disabled).
+- `--kv-stream-mtp-eject-pages N`: eject once the active pages exceed the MTP-active decode capacity by `N` 256-token KV pages (default: 0, i.e. at streaming onset).
+- `--kv-stream-mtp-reenable-pages N`: re-enable once the active pages fit at least `N` pages below that capacity. Must be greater than `--kv-stream-mtp-eject-pages` (default: 8).
+- `--kv-stream-mtp-stable-decodes N`: consecutive decode batches required before a transition (default: 4).
+
+The `LLAMA_ARG_KV_STREAM_MTP_*` environment variables mirror these options. Ejecting returns the MTP weights, the MTP KV cache, and the widened recurrent-state cache to the arena pool; re-enabling restores them. The default configuration ejects at streaming onset and re-enables with an 8-page hysteresis band.
+
+## MTP generation speed
+
+The tables below compare token generation (TG) throughput with MTP against the
+same build with `--spec-type none` (baseline). Measured on an RTX 5060 Ti 16 GB
+with Qwen3.8-27B (Q8_0 K cache, Q4_0 V cache), `--kv-stream-arena-mib 2304`,
+`--ctx-size 180000`, `-ngl 99`, `--flash-attn on`, `--parallel 1`, and 96
+generated tokens at temperature 0. `synthetic` is a repeated sentence; `document`
+is a real source tree/README followed by an instruction.
+
+| prompt tokens | prompt   | baseline TG t/s | MTP TG t/s | gain  |
+|--------------:|----------|----------------:|-----------:|------:|
+|         4,000 | synthetic |            27.9 |       74.7 | 2.67x |
+|         8,000 | synthetic |            27.2 |       73.1 | 2.69x |
+|        12,000 | synthetic |            26.6 |       67.4 | 2.53x |
+|        16,000 | synthetic |            26.1 |       60.1 | 2.30x |
+|        20,000 | synthetic |            25.4 |       52.4 | 2.06x |
+|        35,429 | document  |            23.5 |       27.1 | 1.15x |
+|        54,892 | document  |            21.4 |       16.5 | 0.77x |
+|        73,426 | document  |            19.7 |       11.7 | 0.59x |
+
+MTP also costs prompt-processing throughput: about 830 vs 990 t/s at low
+context, and 620 vs 760 t/s at the largest tested context.
+
+With `--kv-stream-mtp-dynamic`, MTP is kept while it helps and ejected once the
+working set outgrows the MTP-active capacity. After the eject, generation returns
+to the baseline rate exactly:
+
+| prompt tokens | prompt   | baseline TG t/s | static MTP TG t/s | dynamic TG t/s |
+|--------------:|----------|----------------:|------------------:|---------------:|
+|         8,000 | synthetic |            27.2 |              73.1 |           74.6 |
+|        35,429 | document  |            23.5 |              27.1 |           23.5 |
+|        73,426 | document  |            19.7 |              11.7 |           19.7 |
+
+The crossover depends on how predictable the text is: roughly 44k prompt tokens
+for real documents and around 80k for highly repetitive text. Dynamic eject is
+most useful above that point, where it keeps the large-context pool without
+paying the MTP generation penalty.
+
 ## Scope and status
 
 - Validated on an RTX 5060 Ti 16 GB with Qwen3.8-27B, a Q8_0 K cache, a Q4_0 V
