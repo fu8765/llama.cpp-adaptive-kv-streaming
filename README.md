@@ -203,6 +203,14 @@ generation returns to the baseline rate. Keep `--spec-draft-n-max` small (the
 recurrent cache is `149.6 MiB * (1 + n_max)`) and give the arena as much room as
 the model leaves.
 
+## Next steps
+
+Planned work, not implemented on this branch:
+
+- [Quantize the MTP draft KV cache](docs/next-steps/01-mtp-kv-quantization.md): make the automatic pin track `-ctkd`/`-ctvd` so the freed KV becomes decode window.
+- [Keep MTP active while streaming](docs/next-steps/02-mtp-during-streaming.md): eject on measured copy pressure instead of streaming onset.
+- [Enable DFlash2](docs/next-steps/03-dflash2-draft.md): build a vocabulary-matching draft for the condensed target and generalize the pin and eject path.
+
 ## Scope and status
 
 - Validated on an RTX 5060 Ti 16 GB with Qwen3.8-27B, a Q8_0 K cache, a Q4_0 V
