@@ -935,12 +935,83 @@ private:
 
     int64_t t_last_load_progress_ms = 0;
 
-    void destroy() {
+    bool spec_create(llama_progress_callback progress_cb = nullptr, void * progress_ud = nullptr) {
+        const bool has_draft = params_base.speculative.has_dft();
+
+        common_params params_dft = common_base_params_to_speculative(params_base);
+
+        params_dft.load_progress_callback           = progress_cb;
+        params_dft.load_progress_callback_user_data = progress_ud;
+
+        spec_init = common_speculative_init_from_params(params_dft, model_tgt, ctx_tgt);
+        model_dft = spec_init->model();
+        ctx_dft   = spec_init->context();
+
+        if (has_draft && model_dft == nullptr) {
+            SRV_ERR("failed to load draft model, '%s'\n", params_dft.model.path.c_str());
+            return false;
+        }
+
+        if (ctx_dft == nullptr) {
+            SRV_ERR("%s", "failed to create MTP context\n");
+            return false;
+        }
+
+        params_base.speculative.draft.ctx_tgt = ctx_tgt;
+        params_base.speculative.draft.ctx_dft = ctx_dft;
+
+        if (ctx_tgt_seq_rm_type != COMMON_CONTEXT_SEQ_RM_TYPE_NO) {
+            try {
+                spec.reset(common_speculative_init(params_base.speculative, params_base.n_parallel));
+            } catch (const std::exception & e) {
+                SRV_ERR("failed to initialize speculative decoding context: %s\n", e.what());
+                if (params_base.speculative.has_synth()) {
+                    return false;
+                }
+            }
+        }
+
+        if (ctx_dft) {
+            ctx_dft_seq_rm_type = common_context_can_seq_rm(ctx_dft);
+        }
+
+        if (spec == nullptr) {
+            spec_init.reset();
+            ctx_dft   = nullptr;
+            model_dft = nullptr;
+            params_base.speculative.draft.ctx_dft = nullptr;
+            if (params_base.speculative.has_synth()) {
+                SRV_ERR("%s", "synthetic acceptance requires an initialized speculative decoding context\n");
+                return false;
+            }
+        }
+
+        return true;
+    }
+
+    void spec_destroy() {
         spec.reset();
         spec_init.reset();
-
         ctx_dft   = nullptr;
         model_dft = nullptr;
+        params_base.speculative.draft.ctx_dft = nullptr;
+    }
+
+    void spec_rewire_slots(bool enable) {
+        for (auto & slot : slots) {
+            slot.ctx_dft = enable ? ctx_dft : nullptr;
+            slot.spec    = enable ? spec.get() : nullptr;
+            slot.mem.init(ctx_tgt, enable ? ctx_dft : nullptr);
+            slot.spec_draft.clear();
+            slot.spec_i_batch.clear();
+            slot.spec_ckpt.clear();
+            slot.spec_is_replay = false;
+            slot.spec_prompt.clear();
+        }
+    }
+
+    void destroy() {
+        spec_destroy();
 
         llama_init.reset();
 
@@ -1117,34 +1188,23 @@ private:
 
         add_bos_token = llama_vocab_get_add_bos(vocab);
 
+        // note: has_spec reads this value inside spec_create()
+        ctx_tgt_seq_rm_type = common_context_can_seq_rm(ctx_tgt);
+        if (ctx_tgt_seq_rm_type == COMMON_CONTEXT_SEQ_RM_TYPE_NO) {
+            SRV_WRN("%s", "speculative decoding not supported by this context\n");
+        }
+
+        if (ctx_tgt_seq_rm_type == COMMON_CONTEXT_SEQ_RM_TYPE_FULL) {
+            SRV_TRC("%s", "speculative decoding will use checkpoints\n");
+        }
+
         if (has_spec) {
             // spec_mtp doesn't use load a model internally, so we report 0.0 and 1.0 manually
             load_progress_callback(0.0f, &load_progress_spec);
             load_progress_spec.t_last_load_progress_ms = 0;  // reset so internal cbs aren't delayed
 
-            {
-                common_params params_dft = common_base_params_to_speculative(params_base);
-
-                // progress callback
-                params_dft.load_progress_callback           = load_progress_callback;
-                params_dft.load_progress_callback_user_data = &load_progress_spec;
-
-                spec_init = common_speculative_init_from_params(params_dft, model_tgt, ctx_tgt);
-                model_dft = spec_init->model();
-                ctx_dft   = spec_init->context();
-
-                if (has_draft && model_dft == nullptr) {
-                    SRV_ERR("failed to load draft model, '%s'\n", params_dft.model.path.c_str());
-                    return false;
-                }
-
-                if (ctx_dft == nullptr) {
-                    SRV_ERR("%s", "failed to create MTP context\n");
-                    return false;
-                }
-
-                params_base.speculative.draft.ctx_tgt = ctx_tgt;
-                params_base.speculative.draft.ctx_dft = ctx_dft;
+            if (!spec_create(load_progress_callback, &load_progress_spec)) {
+                return false;
             }
 
             load_progress_callback(1.0f, &load_progress_spec);
@@ -1237,15 +1297,6 @@ private:
 
         slots.clear();
 
-        ctx_tgt_seq_rm_type = common_context_can_seq_rm(ctx_tgt);
-        if (ctx_tgt_seq_rm_type == COMMON_CONTEXT_SEQ_RM_TYPE_NO) {
-            SRV_WRN("%s", "speculative decoding not supported by this context\n");
-        }
-
-        if (ctx_tgt_seq_rm_type == COMMON_CONTEXT_SEQ_RM_TYPE_FULL) {
-            SRV_TRC("%s", "speculative decoding will use checkpoints\n");
-        }
-
         // setup slots
         SRV_INF("initializing, n_slots = %d, n_ctx_slot = %d, kv_unified = '%s'\n",
                 params_base.n_parallel, n_ctx_slot(), params_base.kv_unified ? "true" : "false");
@@ -1256,7 +1307,8 @@ private:
         }
 
         // try speculative decoding
-        if (ctx_tgt_seq_rm_type != COMMON_CONTEXT_SEQ_RM_TYPE_NO) {
+        // note: has_spec initializes the engine in spec_create(), before the slots are created
+        if (!has_spec && ctx_tgt_seq_rm_type != COMMON_CONTEXT_SEQ_RM_TYPE_NO) {
             try {
                 spec.reset(common_speculative_init(params_base.speculative, params_base.n_parallel));
             } catch (const std::exception & e) {
@@ -1267,16 +1319,10 @@ private:
             }
         }
 
-        if (ctx_dft) {
-            ctx_dft_seq_rm_type = common_context_can_seq_rm(ctx_dft);
-        }
-
         if (spec) {
             SRV_TRC("%s", "speculative decoding context initialized\n");
         } else {
-            spec_init.reset();
-            ctx_dft   = nullptr;
-            model_dft = nullptr;
+            spec_destroy();
         }
 
         if (!spec && params_base.speculative.has_synth()) {
@@ -1289,9 +1335,6 @@ private:
 
             slot.id      = i;
             slot.ctx_tgt = ctx_tgt;
-            slot.ctx_dft = ctx_dft;
-            slot.mem.init(ctx_tgt, ctx_dft);
-            slot.spec    = spec.get();
             slot.n_ctx   = n_ctx_slot();
 
             slot.mctx                   = mctx;
@@ -1312,6 +1355,8 @@ private:
 
             slot.reset();
         }
+
+        spec_rewire_slots(true);
 
         {
             const char * LLAMA_TRACE = getenv("LLAMA_TRACE");
