@@ -15,7 +15,8 @@ memory management for the MTP draft context. Everything below is experimental.
 ## Results
 
 Measured on an RTX 5060 Ti 16 GB with Qwen3.8-27B (Q8_0 K cache, Q4_0 V
-cache), `-ngl 99`, `--flash-attn on`, and `--parallel 1`.
+cache), `-ngl 99`, `--flash-attn on`, and `--parallel 1`. The model used is
+[bsaleh03's ASCII condensed version of Unsloth UD-IQ4_XS](https://huggingface.co/bsaleh03/Qwen3.8-27B-ASCII-Condensed).
 
 ### Upstream vs MTP (head to head)
 
