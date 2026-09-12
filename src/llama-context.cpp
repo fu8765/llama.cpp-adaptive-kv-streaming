@@ -82,6 +82,43 @@ static const llm_fused_op_probe llm_fused_op_dsv4_hc_post_probe = {
     /*.n_tokens_per_seq =*/ 1,
 };
 
+uint64_t llama_context::kv_stream_pinned_bytes_for(bool mtp_active) const {
+    const auto & hparams = model.hparams;
+
+    if (!spec_mtp_configured) {
+        return 0;
+    }
+
+    uint64_t pinned = 0;
+
+    if (mtp_active && hparams.n_layer_nextn > 0) {
+        const uint32_t il = hparams.n_layer();
+        const uint64_t per_token =
+            uint64_t(hparams.n_embd_k_gqa(il) + hparams.n_embd_v_gqa(il))*ggml_type_size(GGML_TYPE_F16);
+        pinned += (per_token*cparams.n_ctx_seq + 127ULL) & ~127ULL;
+    }
+    if (mtp_active) {
+        pinned += (cparams.mtp_weights_bytes + 127ULL) & ~127ULL;
+    }
+
+    const uint32_t n_rs = mtp_active ? spec_n_rs_seq : 0;
+    const uint64_t n_rows = uint64_t(std::max(1u, cparams.n_seq_max))*(1ULL + n_rs);
+    uint64_t rs_bytes = 0;
+    for (uint32_t il = 0; il < hparams.n_layer(); ++il) {
+        if (!hparams.is_recr(il)) {
+            continue;
+        }
+        uint64_t elems = uint64_t(hparams.n_embd_r()) + hparams.n_embd_s();
+        if (hparams.ple_conv_state() > 0 && hparams.is_ple(il)) {
+            elems += hparams.ple_conv_state();
+        }
+        rs_bytes += n_rows*elems*ggml_type_size(GGML_TYPE_F32);
+    }
+    pinned += (rs_bytes + 127ULL) & ~127ULL;
+
+    return pinned;
+}
+
 llama_context::llama_context(
         const llama_model & model,
               llama_context_params params) :
@@ -390,6 +427,10 @@ llama_context::llama_context(
 
     // init the memory module
     if (!hparams.vocab_only) {
+        spec_mtp_configured   = cparams.spec_mtp;
+        spec_n_rs_seq         = cparams.n_rs_seq;
+        spec_n_max_spec_draft = cparams.n_max_spec_draft;
+
         const uint64_t kv_stream_arena_bytes = uint64_t(cparams.kv_stream_arena_mib)*1024ULL*1024ULL;
         uint64_t kv_stream_stage_bytes = kv_stream_arena_bytes;
         uint64_t kv_stream_minimum_stage_bytes = 0;
@@ -414,6 +455,7 @@ llama_context::llama_context(
             using arena_free_fn_t = void (*)(void *);
             using arena_set_compute_fn_t = bool (*)(void *, size_t, size_t);
             using arena_set_pinned_fn_t = bool (*)(void *, size_t, size_t);
+            using arena_reset_pinned_fn_t = void (*)(void *);
             using arena_buffer_type_fn_t = ggml_backend_buffer_type_t (*)(void *);
             using arena_pinned_buffer_type_fn_t = ggml_backend_buffer_type_t (*)(void *);
             using graph_reset_fn_t = bool (*)(ggml_backend_t);
@@ -478,42 +520,8 @@ llama_context::llama_context(
                 conversion_bytes + bootstrap_pages*page_bytes;
             kv_stream_minimum_stage_bytes = (bootstrap_raw + 127ULL) & ~127ULL;
 
-            // MTP keeps an ordinary KV cache outside the streaming pool. Pin its
-            // space at the top of the arena so the target pool can grow into it
-            // once the MTP cache is ejected.
-            uint64_t kv_stream_pinned_bytes = 0;
-            if (cparams.spec_mtp && hparams.n_layer_nextn > 0) {
-                const uint32_t il_pinned = hparams.n_layer();
-                const uint64_t per_token =
-                    uint64_t(hparams.n_embd_k_gqa(il_pinned) +
-                             hparams.n_embd_v_gqa(il_pinned)) * ggml_type_size(GGML_TYPE_F16);
-                kv_stream_pinned_bytes = per_token*cparams.n_ctx_seq;
-                kv_stream_pinned_bytes = (kv_stream_pinned_bytes + 127ULL) & ~127ULL;
-            }
-            // a standalone MTP draft model weighs its weights into the arena too,
-            // so that ejecting MTP returns both the KV and the weights to the pool
-            if (cparams.spec_mtp) {
-                kv_stream_pinned_bytes += (cparams.mtp_weights_bytes + 127ULL) & ~127ULL;
-            }
-            // the target's recurrent-state cache is otherwise a separate full-length
-            // allocation. Pin it as well when MTP widens it (n_rs_seq > 0), so that a
-            // fixed arena covers it and the ngram case keeps its full pool.
-            if (cparams.spec_mtp) {
-                const uint64_t n_rows =
-                    uint64_t(std::max(1u, cparams.n_seq_max))*(1ULL + cparams.n_rs_seq);
-                uint64_t rs_bytes = 0;
-                for (uint32_t il = 0; il < hparams.n_layer(); ++il) {
-                    if (!hparams.is_recr(il)) {
-                        continue;
-                    }
-                    uint64_t elems = uint64_t(hparams.n_embd_r()) + hparams.n_embd_s();
-                    if (hparams.ple_conv_state() > 0 && hparams.is_ple(il)) {
-                        elems += hparams.ple_conv_state();
-                    }
-                    rs_bytes += n_rows*elems*ggml_type_size(GGML_TYPE_F32);
-                }
-                kv_stream_pinned_bytes += (rs_bytes + 127ULL) & ~127ULL;
-            }
+            const uint64_t kv_stream_pinned_bytes =
+                kv_stream_pinned_bytes_for(spec_mtp_configured);
             if (kv_stream_pinned_bytes >= kv_stream_arena_bytes ||
                     kv_stream_minimum_stage_bytes >= kv_stream_arena_bytes - kv_stream_pinned_bytes) {
                 throw std::runtime_error(
@@ -531,6 +539,8 @@ llama_context::llama_context(
                 reg, "ggml_backend_cuda_phase_arena_set_compute");
             auto arena_set_pinned_fn = (arena_set_pinned_fn_t) ggml_backend_reg_get_proc_address(
                 reg, "ggml_backend_cuda_phase_arena_set_pinned");
+            auto arena_reset_pinned_fn = (arena_reset_pinned_fn_t) ggml_backend_reg_get_proc_address(
+                reg, "ggml_backend_cuda_phase_arena_reset_pinned");
             auto arena_buffer_type_fn = (arena_buffer_type_fn_t) ggml_backend_reg_get_proc_address(
                 reg, "ggml_backend_cuda_phase_arena_buffer_type");
             auto arena_pinned_buffer_type_fn = (arena_pinned_buffer_type_fn_t)
@@ -540,6 +550,7 @@ llama_context::llama_context(
                 reg, "ggml_backend_cuda_graph_reset");
             if (arena_new_fn == nullptr || arena_free_fn == nullptr ||
                     arena_set_compute_fn == nullptr || arena_set_pinned_fn == nullptr ||
+                    arena_reset_pinned_fn == nullptr ||
                     arena_buffer_type_fn == nullptr || arena_pinned_buffer_type_fn == nullptr ||
                     graph_reset_fn == nullptr) {
                 throw std::runtime_error("block KV streaming phase arena is unavailable");
@@ -550,11 +561,13 @@ llama_context::llama_context(
             kv_stream_phase_arena.free_fn = arena_free_fn;
             kv_stream_phase_arena.set_compute_fn = arena_set_compute_fn;
             kv_stream_phase_arena.set_pinned_fn = arena_set_pinned_fn;
+            kv_stream_phase_arena.reset_pinned_fn = arena_reset_pinned_fn;
             kv_stream_phase_arena.buffer_type_fn = arena_buffer_type_fn;
             kv_stream_phase_arena.pinned_buffer_type_fn = arena_pinned_buffer_type_fn;
             kv_stream_phase_arena.graph_reset_fn = graph_reset_fn;
             kv_stream_phase_arena.device = stream_device;
             kv_stream_phase_arena.arena_bytes = kv_stream_effective_arena_bytes;
+            kv_stream_phase_arena.arena_total_bytes = kv_stream_arena_bytes;
             kv_stream_phase_arena.page_bytes = page_bytes;
             kv_stream_phase_arena.conversion_bytes = conversion_bytes;
             kv_stream_phase_arena.layer_count = layer_count;
@@ -602,7 +615,7 @@ llama_context::llama_context(
             /*.type_v                =*/ params.type_v,
             /*.kv_stream_stage_bytes =*/ kv_stream_stage_bytes,
             /*.kv_stream_phase_arena =*/ kv_stream_phase_arena.arena,
-            /*.kv_stream_maximum_pool_bytes =*/ kv_stream_phase_arena.arena_bytes,
+            /*.kv_stream_maximum_pool_bytes =*/ kv_stream_phase_arena.arena_total_bytes,
             /*.swa_full              =*/ params.swa_full,
             /*.ctx_type              =*/ cparams.ctx_type,
             /*.mem_other             =*/ llama_get_memory(cparams.ctx_other),
@@ -611,7 +624,7 @@ llama_context::llama_context(
                                             ? params.ctx_other->kv_stream_phase_arena.pinned_buffer_type
                                             : nullptr,
             /*.rs_secondary_buft    =*/ cparams.ctx_type == LLAMA_CONTEXT_TYPE_DEFAULT &&
-                                        cparams.spec_mtp
+                                        spec_mtp_configured
                                             ? kv_stream_phase_arena.pinned_buffer_type
                                             : nullptr,
         };

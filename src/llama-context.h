@@ -300,6 +300,7 @@ private:
         void (*free_fn)(void *) = nullptr;
         bool (*set_compute_fn)(void *, size_t, size_t) = nullptr;
         bool (*set_pinned_fn)(void *, size_t, size_t) = nullptr;
+        void (*reset_pinned_fn)(void *) = nullptr;
         ggml_backend_buffer_type_t (*buffer_type_fn)(void *) = nullptr;
         ggml_backend_buffer_type_t (*pinned_buffer_type_fn)(void *) = nullptr;
         bool (*graph_reset_fn)(ggml_backend_t) = nullptr;
@@ -308,6 +309,7 @@ private:
         ggml_backend_buffer_type_t pinned_buffer_type = nullptr;
         size_t pinned_bytes = 0;
         size_t arena_bytes = 0;
+        size_t arena_total_bytes = 0;
         size_t page_bytes = 0;
         size_t conversion_bytes = 0;
         uint32_t layer_count = 0;
@@ -334,6 +336,13 @@ private:
 
     // Declared before memory and scheduler so their arena leases are released first.
     kv_stream_phase_arena_owner kv_stream_phase_arena;
+
+    // captured at construction so the MTP reservation can be restored
+    bool     spec_mtp_configured = false;
+    uint32_t spec_n_rs_seq = 0;
+    uint32_t spec_n_max_spec_draft = 0;
+
+    uint64_t kv_stream_pinned_bytes_for(bool mtp_active) const;
 
     llama_adapter_cvec_ptr  cvec;
     llama_adapter_loras_ptr loras;
