@@ -166,6 +166,14 @@ public:
     bool kv_stream_resize_pool(
         size_t pool_bytes, uint32_t active_tokens, uint32_t ring_slots);
 
+    bool     kv_stream_streaming() const;
+    uint64_t kv_stream_pool_free_bytes() const;
+    uint32_t kv_stream_active_pages() const;
+    uint32_t kv_stream_resident_pages() const;
+    uint32_t kv_stream_ring_slots() const;
+    uint32_t kv_stream_layer_count() const;
+    uint32_t kv_stream_page_bytes() const;
+
     bool get_has_shift() const;
 
     ggml_type type_k() const;
@@ -317,12 +325,19 @@ private:
         decode_layout_fn_t decode_layout_fn = nullptr;
         mark_dirty_rows_fn_t mark_dirty_rows_fn = nullptr;
         resize_pool_fn_t resize_pool_fn = nullptr;
+        size_t (*pool_bytes_fn)(void *) = nullptr;
         uint32_t layer_count = 0;
         uint32_t minimum_ring_slots = 0;
         uint32_t decode_layout_pages = 0;
         uint32_t starved_evaluations = 0;
         uint32_t overprovisioned_evaluations = 0;
         uint32_t evaluations_since_repartition = UINT32_MAX;
+        bool     streaming = false;
+        uint32_t active_pages = 0;
+        uint32_t resident_pages_per_layer = 0;
+        uint32_t ring_slots = 0;
+        uint32_t controlled_pool_pages = 0;
+        size_t   page_bytes = 0;
         uint64_t previous_deadline_samples = 0;
         uint64_t previous_deadline_misses = 0;
         int64_t previous_adapt_us = 0;

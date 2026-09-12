@@ -354,6 +354,18 @@ extern "C" {
         struct llama_sampler * sampler;
     };
 
+    struct llama_kv_stream_status {
+        bool     enabled;                    // streaming runtime present and arena configured
+        bool     streaming;                  // active pages exceed resident pages
+        uint32_t active_pages;               // active KV pages per layer
+        uint32_t resident_pages_per_layer;   // resident pages per layer
+        uint32_t ring_slots;                 // ring/staging slots
+        uint32_t layer_count;                // streaming attention layers
+        uint32_t page_bytes;                 // bytes per KV page
+        uint64_t pool_free_bytes;            // controlled pool bytes minus the active working set
+        uint64_t mtp_reserved_bytes;         // pinned(true) - pinned(false); 0 when MTP is not configured
+    };
+
     // NOTE: changing the default values of parameters marked as [EXPERIMENTAL] may cause crashes or incorrect results in certain configurations
     //       https://github.com/ggml-org/llama.cpp/pull/7544
     struct llama_context_params {
@@ -604,6 +616,9 @@ extern "C" {
 
     // buffer type backing the KV-stream phase arena pinned region of ctx (NULL if none)
     LLAMA_API ggml_backend_buffer_type_t llama_kv_stream_pinned_buft(struct llama_context * ctx);
+
+    // Query the phase-arena KV streaming status. Returns false when streaming is not enabled.
+    LLAMA_API bool llama_kv_stream_get_status(struct llama_context * ctx, struct llama_kv_stream_status * status);
 
     // Reconfigure the phase arena between the MTP-reserved and MTP-free layouts.
     // Must be called between ubatches, not concurrently with llama_decode.

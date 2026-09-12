@@ -1276,6 +1276,33 @@ ggml_backend_buffer_type_t llama_context::get_kv_stream_pinned_buft() const {
     return kv_stream_phase_arena.pinned_buffer_type;
 }
 
+bool llama_context::kv_stream_get_status(llama_kv_stream_status * status) const {
+    if (status == nullptr || !kv_stream_phase_arena.configured) {
+        return false;
+    }
+
+    auto * hybrid = dynamic_cast<llama_memory_hybrid *>(memory.get());
+    if (hybrid == nullptr || hybrid->get_mem_attn() == nullptr) {
+        return false;
+    }
+
+    const llama_kv_cache * kv = hybrid->get_mem_attn();
+
+    status->enabled = true;
+    status->streaming = kv->kv_stream_streaming();
+    status->active_pages = kv->kv_stream_active_pages();
+    status->resident_pages_per_layer = kv->kv_stream_resident_pages();
+    status->ring_slots = kv->kv_stream_ring_slots();
+    status->layer_count = kv->kv_stream_layer_count();
+    status->page_bytes = kv->kv_stream_page_bytes();
+    status->pool_free_bytes = kv->kv_stream_pool_free_bytes();
+    status->mtp_reserved_bytes = spec_mtp_configured
+        ? kv_stream_pinned_bytes_for(true) - kv_stream_pinned_bytes_for(false)
+        : 0;
+
+    return true;
+}
+
 bool llama_context::kv_stream_mtp_set(bool mtp_active) {
     auto & arena = kv_stream_phase_arena;
 
@@ -5044,4 +5071,8 @@ bool llama_kv_stream_mtp_set(llama_context * ctx, bool mtp_active) {
         LLAMA_LOG_ERROR("%s: exception during MTP toggle: %s\n", __func__, e.what());
         return false;
     }
+}
+
+bool llama_kv_stream_get_status(llama_context * ctx, llama_kv_stream_status * status) {
+    return ctx->kv_stream_get_status(status);
 }

@@ -292,6 +292,9 @@ llama_kv_cache::llama_kv_cache(
                     auto * resize_pool_fn = (kv_stream_runtime_owner::resize_pool_fn_t)
                         ggml_backend_reg_get_proc_address(
                             reg, "ggml_backend_cuda_kv_stream_resize_pool");
+                    auto * pool_bytes_fn = (size_t (*)(void *))
+                        ggml_backend_reg_get_proc_address(
+                            reg, "ggml_backend_cuda_kv_stream_pool_bytes");
 
                     if (type_pair_supported_fn == nullptr || page_bytes_fn == nullptr ||
                             workspace_bytes_fn == nullptr || runtime_new_fn == nullptr ||
@@ -302,7 +305,7 @@ llama_kv_cache::llama_kv_cache(
                             repartition_fn == nullptr || decode_layout_fn == nullptr ||
                             reconfigure_fn == nullptr ||
                             mark_dirty_rows_fn == nullptr ||
-                            resize_pool_fn == nullptr) {
+                            resize_pool_fn == nullptr || pool_bytes_fn == nullptr) {
                         throw std::runtime_error("block KV streaming requires the CUDA backend");
                     }
 
@@ -342,7 +345,9 @@ llama_kv_cache::llama_kv_cache(
                     kv_stream_runtime.decode_layout_fn = decode_layout_fn;
                     kv_stream_runtime.mark_dirty_rows_fn = mark_dirty_rows_fn;
                     kv_stream_runtime.resize_pool_fn = resize_pool_fn;
+                    kv_stream_runtime.pool_bytes_fn = pool_bytes_fn;
                     kv_stream_runtime.layer_count = kv_stream_layer_count;
+                    kv_stream_runtime.page_bytes = page_bytes;
                     if (kv_stream_runtime.runtime == nullptr) {
                         throw std::runtime_error("failed to create CUDA block KV streaming runtime");
                     }
@@ -1378,6 +1383,43 @@ bool llama_kv_cache::kv_stream_resize_pool(
     return true;
 }
 
+bool llama_kv_cache::kv_stream_streaming() const {
+    return kv_stream_runtime.streaming;
+}
+
+uint64_t llama_kv_cache::kv_stream_pool_free_bytes() const {
+    const auto & o = kv_stream_runtime;
+    if (o.runtime == nullptr || o.layer_count == 0) {
+        return 0;
+    }
+    const uint64_t controlled = o.controlled_pool_pages;
+    const uint64_t used = uint64_t(o.active_pages)*o.layer_count;
+    if (controlled <= used) {
+        return 0;
+    }
+    return (controlled - used)*o.page_bytes;
+}
+
+uint32_t llama_kv_cache::kv_stream_active_pages() const {
+    return kv_stream_runtime.active_pages;
+}
+
+uint32_t llama_kv_cache::kv_stream_resident_pages() const {
+    return kv_stream_runtime.resident_pages_per_layer;
+}
+
+uint32_t llama_kv_cache::kv_stream_ring_slots() const {
+    return kv_stream_runtime.ring_slots;
+}
+
+uint32_t llama_kv_cache::kv_stream_layer_count() const {
+    return kv_stream_runtime.layer_count;
+}
+
+uint32_t llama_kv_cache::kv_stream_page_bytes() const {
+    return (uint32_t) kv_stream_runtime.page_bytes;
+}
+
 bool llama_kv_cache::kv_stream_adapt(uint32_t active_tokens, uint32_t query_tokens) {
     auto & owner = kv_stream_runtime;
     if (owner.runtime == nullptr || owner.feedback_fn == nullptr ||
@@ -1427,6 +1469,13 @@ bool llama_kv_cache::kv_stream_adapt(uint32_t active_tokens, uint32_t query_toke
     }
 
     const uint32_t active_pages = (active_tokens + 255)/256;
+
+    owner.streaming = active_pages > resident_pages;
+    owner.active_pages = active_pages;
+    owner.resident_pages_per_layer = resident_pages;
+    owner.ring_slots = ring_slots;
+    owner.controlled_pool_pages = controlled_pages;
+
     // Prompt chunks use the uniform layout because it grows without
     // repartitioning. Decode-like microbatches concentrate the same page
     // budget into fewer split layers, bounded by the ring working set so copy
