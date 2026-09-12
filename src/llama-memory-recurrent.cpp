@@ -134,7 +134,12 @@ bool llama_memory_recurrent::rebuild(uint32_t n_rs_seq, ggml_backend_buffer_type
     }
 
     this->n_rs_seq = n_rs_seq;
-    alloc_buffers();
+    try {
+        alloc_buffers();
+    } catch (const std::exception & e) {
+        LLAMA_LOG_ERROR("%s: failed to rebuild recurrent cache: %s; context is unusable\n", __func__, e.what());
+        return false;
+    }
 
     for (int i = 0; i < n_layer; i++) {
         if (r_l[i] == nullptr) {
