@@ -1276,9 +1276,57 @@ ggml_backend_buffer_type_t llama_context::get_kv_stream_pinned_buft() const {
 }
 
 bool llama_context::kv_stream_mtp_set(bool mtp_active) {
-    // replaced in Task 5
-    (void) mtp_active;
-    return false;
+    if (!kv_stream_phase_arena.configured) {
+        return false;
+    }
+    if (cparams.spec_mtp == mtp_active) {
+        return true;
+    }
+
+    auto * hybrid = dynamic_cast<llama_memory_hybrid *>(memory.get());
+    if (hybrid == nullptr || hybrid->get_mem_recr() == nullptr) {
+        return false;
+    }
+    llama_memory_recurrent * mem_recr = hybrid->get_mem_recr();
+
+    const uint64_t new_pinned = kv_stream_pinned_bytes_for(mtp_active);
+
+    synchronize();
+    kv_stream_phase_arena.graph_reset_fn(backend_ptrs[kv_stream_phase_arena.backend_index]);
+    gf_res_prev->reset();
+    gf_res_reserve->reset();
+    sched.reset();
+
+    const bool ok = mem_recr->rebuild(
+        mtp_active ? spec_n_rs_seq : 0,
+        kv_stream_phase_arena.pinned_buffer_type,
+        [&]() {
+            kv_stream_phase_arena.reset_pinned_fn(kv_stream_phase_arena.arena);
+            if (new_pinned != 0) {
+                kv_stream_phase_arena.set_pinned_fn(
+                    kv_stream_phase_arena.arena,
+                    kv_stream_phase_arena.arena_total_bytes - new_pinned,
+                    new_pinned);
+            }
+            kv_stream_phase_arena.pinned_bytes = new_pinned;
+            kv_stream_phase_arena.arena_bytes =
+                kv_stream_phase_arena.arena_total_bytes - new_pinned;
+        });
+    if (!ok) {
+        return false;
+    }
+
+    cparams.spec_mtp         = mtp_active;
+    cparams.n_rs_seq         = mtp_active ? spec_n_rs_seq : 0;
+    cparams.n_max_spec_draft = mtp_active ? spec_n_max_spec_draft : 0;
+
+    sched_need_reserve = true;
+    sched_reserve();
+
+    LLAMA_LOG_INFO("%s: MTP %s, pinned = %.2f MiB, arena = %.2f MiB\n", __func__,
+            mtp_active ? "enabled" : "ejected",
+            new_pinned/1024.0/1024.0, kv_stream_phase_arena.arena_bytes/1024.0/1024.0);
+    return true;
 }
 
 ggml_backend_sched_t llama_context::get_sched() const {
