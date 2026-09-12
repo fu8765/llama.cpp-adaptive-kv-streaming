@@ -20,6 +20,9 @@
 void llama_memory_recurrent::alloc_buffers() {
     const int32_t n_layer = hparams.n_layer();
 
+    // drop any buffers from a previous allocation (e.g. a failed rebuild attempt)
+    ctxs_bufs.clear();
+
     struct ggml_backend_buft_comparator {
         bool operator()(const ggml_backend_buffer_type_t & lhs, const ggml_backend_buffer_type_t & rhs) const {
             return strcmp(ggml_backend_buft_name(lhs), ggml_backend_buft_name(rhs)) < 0;
@@ -98,19 +101,19 @@ void llama_memory_recurrent::alloc_buffers() {
     }
 }
 
-bool llama_memory_recurrent::rebuild(uint32_t n_rs_seq, ggml_backend_buffer_type_t secondary_buft,
-                                     const std::function<void()> & repin) {
+llama_memory_recurrent::rebuild_result llama_memory_recurrent::rebuild(
+        uint32_t n_rs_seq, const std::function<bool(uint32_t n_rs_seq)> & repin) {
     for (uint32_t v : rs_idx) {
         if (v != 0) {
             LLAMA_LOG_ERROR("%s: cannot rebuild with a pending rollback\n", __func__);
-            return false;
+            return REBUILD_REFUSED;
         }
     }
 
     const int32_t n_layer = hparams.n_layer();
-    const size_t row_r = hparams.n_embd_r()*ggml_type_size(type_r);
-    const size_t row_s = hparams.n_embd_s()*ggml_type_size(type_s);
-    const size_t row_p = hparams.ple_conv_state()*ggml_type_size(type_r);
+    const size_t row_r = ggml_row_size(type_r, hparams.n_embd_r());
+    const size_t row_s = ggml_row_size(type_s, hparams.n_embd_s());
+    const size_t row_p = ggml_row_size(type_r, hparams.ple_conv_state());
 
     std::vector<std::vector<uint8_t>> stage_r(n_layer), stage_s(n_layer), stage_p(n_layer);
     for (int i = 0; i < n_layer; i++) {
@@ -127,34 +130,59 @@ bool llama_memory_recurrent::rebuild(uint32_t n_rs_seq, ggml_backend_buffer_type
         }
     }
 
-    this->secondary_buft = secondary_buft;
+    auto copy_committed = [&]() {
+        for (int i = 0; i < n_layer; i++) {
+            if (r_l[i] == nullptr) {
+                continue;
+            }
+            ggml_backend_tensor_set(r_l[i], stage_r[i].data(), 0, stage_r[i].size());
+            ggml_backend_tensor_set(s_l[i], stage_s[i].data(), 0, stage_s[i].size());
+            if (p_l[i] != nullptr) {
+                ggml_backend_tensor_set(p_l[i], stage_p[i].data(), 0, stage_p[i].size());
+            }
+        }
+    };
+
+    const uint32_t old_n_rs_seq = this->n_rs_seq;
+
+    // restore the old layout after a failure; leaves the object untouched if the
+    // restoration itself fails, in which case the caller must not use it
+    auto restore = [&]() -> rebuild_result {
+        ctxs_bufs.clear();
+        this->n_rs_seq = old_n_rs_seq;
+        if (repin && !repin(old_n_rs_seq)) {
+            LLAMA_LOG_ERROR("%s: failed to restore the arena pin; recurrent cache is unusable\n", __func__);
+            return REBUILD_ALLOC_FAILED_UNUSABLE;
+        }
+        try {
+            alloc_buffers();
+        } catch (const std::exception & e) {
+            LLAMA_LOG_ERROR("%s: failed to restore the recurrent cache: %s; context is unusable\n", __func__, e.what());
+            return REBUILD_ALLOC_FAILED_UNUSABLE;
+        }
+        copy_committed();
+        return REBUILD_ALLOC_FAILED_RESTORED;
+    };
+
     ctxs_bufs.clear();
-    if (repin) {
-        repin();
+    if (repin && !repin(n_rs_seq)) {
+        LLAMA_LOG_ERROR("%s: failed to pin the arena for n_rs_seq=%u\n", __func__, n_rs_seq);
+        return restore();
     }
 
     this->n_rs_seq = n_rs_seq;
     try {
         alloc_buffers();
     } catch (const std::exception & e) {
-        LLAMA_LOG_ERROR("%s: failed to rebuild recurrent cache: %s; context is unusable\n", __func__, e.what());
-        return false;
+        LLAMA_LOG_ERROR("%s: failed to rebuild recurrent cache: %s\n", __func__, e.what());
+        return restore();
     }
 
-    for (int i = 0; i < n_layer; i++) {
-        if (r_l[i] == nullptr) {
-            continue;
-        }
-        ggml_backend_tensor_set(r_l[i], stage_r[i].data(), 0, stage_r[i].size());
-        ggml_backend_tensor_set(s_l[i], stage_s[i].data(), 0, stage_s[i].size());
-        if (p_l[i] != nullptr) {
-            ggml_backend_tensor_set(p_l[i], stage_p[i].data(), 0, stage_p[i].size());
-        }
-    }
+    copy_committed();
 
     std::fill(rs_idx.begin(), rs_idx.end(), 0);
     rs_z = -1;
-    return true;
+    return REBUILD_OK;
 }
 
 llama_memory_recurrent::llama_memory_recurrent(
@@ -179,9 +207,6 @@ llama_memory_recurrent::llama_memory_recurrent(
 
     this->type_r = type_r;
     this->type_s = type_s;
-    this->offload = offload;
-    this->filter = filter;
-    this->secondary_buft = secondary_buft;
 
     const int32_t n_layer = hparams.n_layer();
     layer_buft.assign(n_layer, nullptr);

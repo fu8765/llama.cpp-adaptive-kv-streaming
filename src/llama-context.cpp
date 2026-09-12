@@ -571,6 +571,7 @@ llama_context::llama_context(
             kv_stream_phase_arena.page_bytes = page_bytes;
             kv_stream_phase_arena.conversion_bytes = conversion_bytes;
             kv_stream_phase_arena.layer_count = layer_count;
+            kv_stream_phase_arena.minimum_stage_bytes = kv_stream_minimum_stage_bytes;
             kv_stream_phase_arena.current_kv_bytes = kv_stream_minimum_stage_bytes;
             kv_stream_phase_arena.current_compute_offset =
                 kv_stream_minimum_stage_bytes;
@@ -1276,7 +1277,9 @@ ggml_backend_buffer_type_t llama_context::get_kv_stream_pinned_buft() const {
 }
 
 bool llama_context::kv_stream_mtp_set(bool mtp_active) {
-    if (!kv_stream_phase_arena.configured) {
+    auto & arena = kv_stream_phase_arena;
+
+    if (!arena.configured) {
         return false;
     }
     if (mtp_active && !spec_mtp_configured) {
@@ -1292,45 +1295,102 @@ bool llama_context::kv_stream_mtp_set(bool mtp_active) {
     }
     llama_memory_recurrent * mem_recr = hybrid->get_mem_recr();
 
-    const uint64_t new_pinned = kv_stream_pinned_bytes_for(mtp_active);
+    // a pending rollback occupies a snapshot plane that a rebuild would drop;
+    // refuse before touching the scheduler or the arena
+    for (uint32_t v : mem_recr->rs_idx) {
+        if (v != 0) {
+            LLAMA_LOG_ERROR("%s: pending recurrent rollback, refusing MTP toggle\n", __func__);
+            return false;
+        }
+    }
+
+    const uint64_t arena_total = arena.arena_total_bytes;
+    const uint64_t min_stage = arena.minimum_stage_bytes;
+
+    auto pin_fits = [&](uint64_t pinned) {
+        return pinned < arena_total && min_stage < arena_total - pinned;
+    };
+
+    // place the arena pin for the given rs layout; false leaves no tenant behind
+    auto repin = [&](uint32_t n_rs_seq) -> bool {
+        const uint64_t pinned = kv_stream_pinned_bytes_for(n_rs_seq != 0);
+        if (!pin_fits(pinned)) {
+            LLAMA_LOG_ERROR("%s: arena too small for the %s pin (%llu bytes)\n", __func__,
+                    n_rs_seq != 0 ? "MTP" : "small", (unsigned long long) pinned);
+            return false;
+        }
+        arena.reset_pinned_fn(arena.arena);
+        if (pinned != 0 && !arena.set_pinned_fn(arena.arena, arena_total - pinned, pinned)) {
+            LLAMA_LOG_ERROR("%s: failed to pin %llu arena bytes\n", __func__,
+                    (unsigned long long) pinned);
+            return false;
+        }
+        arena.pinned_bytes = pinned;
+        arena.arena_bytes = arena_total - pinned;
+        return true;
+    };
+
+    if (!pin_fits(kv_stream_pinned_bytes_for(mtp_active))) {
+        LLAMA_LOG_ERROR("%s: requested MTP layout does not fit in the arena\n", __func__);
+        return false;
+    }
+
+    if (arena.backend_index >= backend_ptrs.size()) {
+        LLAMA_LOG_ERROR("%s: invalid phase-arena backend index\n", __func__);
+        return false;
+    }
 
     synchronize();
-    kv_stream_phase_arena.graph_reset_fn(backend_ptrs[kv_stream_phase_arena.backend_index]);
+    if (sched && !arena.graph_reset_fn(backend_ptrs[arena.backend_index])) {
+        LLAMA_LOG_ERROR("%s: failed to invalidate CUDA graphs before MTP toggle\n", __func__);
+        return false;
+    }
     gf_res_prev->reset();
     gf_res_reserve->reset();
     sched.reset();
 
-    const bool ok = mem_recr->rebuild(
-        mtp_active ? spec_n_rs_seq : 0,
-        kv_stream_phase_arena.pinned_buffer_type,
-        [&]() {
-            kv_stream_phase_arena.reset_pinned_fn(kv_stream_phase_arena.arena);
-            if (new_pinned != 0) {
-                kv_stream_phase_arena.set_pinned_fn(
-                    kv_stream_phase_arena.arena,
-                    kv_stream_phase_arena.arena_total_bytes - new_pinned,
-                    new_pinned);
-            }
-            kv_stream_phase_arena.pinned_bytes = new_pinned;
-            kv_stream_phase_arena.arena_bytes =
-                kv_stream_phase_arena.arena_total_bytes - new_pinned;
-        });
-    if (!ok) {
+    const auto result = mem_recr->rebuild(mtp_active ? spec_n_rs_seq : 0, repin);
+
+    auto reserve = [&]() -> bool {
         sched_need_reserve = true;
-        sched_reserve();
-        return false;
+        try {
+            sched_reserve();
+            return true;
+        } catch (const std::exception & e) {
+            LLAMA_LOG_ERROR("%s: failed to re-reserve after the MTP toggle: %s\n", __func__, e.what());
+            return false;
+        }
+    };
+
+    switch (result) {
+        case llama_memory_recurrent::REBUILD_OK:
+            break;
+        case llama_memory_recurrent::REBUILD_REFUSED:
+            // the pre-check makes this unreachable; the memory was not touched
+            LLAMA_LOG_ERROR("%s: recurrent rebuild refused\n", __func__);
+            reserve();
+            return false;
+        case llama_memory_recurrent::REBUILD_ALLOC_FAILED_RESTORED:
+            LLAMA_LOG_ERROR("%s: MTP toggle failed, previous layout restored\n", __func__);
+            reserve();
+            return false;
+        case llama_memory_recurrent::REBUILD_ALLOC_FAILED_UNUSABLE:
+            LLAMA_LOG_ERROR("%s: MTP toggle failed and the recurrent cache could not be restored; context is unusable\n", __func__);
+            sched_need_reserve = false;
+            return false;
     }
 
     cparams.spec_mtp         = mtp_active;
     cparams.n_rs_seq         = mtp_active ? spec_n_rs_seq : 0;
     cparams.n_max_spec_draft = mtp_active ? spec_n_max_spec_draft : 0;
 
-    sched_need_reserve = true;
-    sched_reserve();
+    if (!reserve()) {
+        return false;
+    }
 
     LLAMA_LOG_INFO("%s: MTP %s, pinned = %.2f MiB, arena = %.2f MiB\n", __func__,
             mtp_active ? "enabled" : "ejected",
-            new_pinned/1024.0/1024.0, kv_stream_phase_arena.arena_bytes/1024.0/1024.0);
+            arena.pinned_bytes/1024.0/1024.0, arena.arena_bytes/1024.0/1024.0);
     return true;
 }
 
@@ -4978,5 +5038,10 @@ ggml_backend_buffer_type_t llama_kv_stream_pinned_buft(struct llama_context * ct
 }
 
 bool llama_kv_stream_mtp_set(llama_context * ctx, bool mtp_active) {
-    return ctx->kv_stream_mtp_set(mtp_active);
+    try {
+        return ctx->kv_stream_mtp_set(mtp_active);
+    } catch (const std::exception & e) {
+        LLAMA_LOG_ERROR("%s: exception during MTP toggle: %s\n", __func__, e.what());
+        return false;
+    }
 }

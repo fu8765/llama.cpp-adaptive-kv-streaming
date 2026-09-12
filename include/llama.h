@@ -606,7 +606,10 @@ extern "C" {
     LLAMA_API ggml_backend_buffer_type_t llama_kv_stream_pinned_buft(struct llama_context * ctx);
 
     // Reconfigure the phase arena between the MTP-reserved and MTP-free layouts.
-    // Setting false requires the MTP context and draft model to be destroyed first.
+    // Must be called between ubatches, not concurrently with llama_decode.
+    // Setting false requires the MTP context and draft model to have been destroyed first.
+    // Setting true only reserves the region; the caller must create the MTP context
+    // afterwards so its weights and KV cache allocate from the pinned buft.
     LLAMA_API bool llama_kv_stream_mtp_set(struct llama_context * ctx, bool mtp_active);
 
     // Get the model's RoPE frequency scaling factor

@@ -80,10 +80,19 @@ public:
 
     void set_rs_idx(llama_seq_id seq_id, uint32_t idx);
 
+    enum rebuild_result {
+        REBUILD_OK,                    // buffers rebuilt for the requested layout
+        REBUILD_REFUSED,               // pending rollback, nothing touched
+        REBUILD_ALLOC_FAILED_RESTORED, // allocation failed, old buffers and pin restored
+        REBUILD_ALLOC_FAILED_UNUSABLE, // allocation failed and the old state could not be restored
+    };
+
     // Reallocate the rollback planes, preserving the committed state (plane 0).
-    // repin() runs between releasing the old buffers and allocating the new ones.
-    bool rebuild(uint32_t n_rs_seq, ggml_backend_buffer_type_t secondary_buft,
-                 const std::function<void()> & repin);
+    // repin(n_rs_seq) runs between releasing the old buffers and allocating the new
+    // ones and must place the arena pin for the given layout; it returns false on
+    // failure. If an allocation fails, the old pin and buffers are restored when possible.
+    rebuild_result rebuild(uint32_t n_rs_seq,
+                           const std::function<bool(uint32_t n_rs_seq)> & repin);
 
     // computed before each graph build
     uint32_t n = 0;
@@ -127,12 +136,11 @@ private:
 
     const uint32_t n_seq_max = 1;
 
-    // kept so the buffers can be rebuilt at runtime
+    // kept so alloc_buffers() can rebuild with a different n_rs_seq
     ggml_type type_r = GGML_TYPE_F32;
     ggml_type type_s = GGML_TYPE_F32;
-    bool offload = true;
-    layer_filter_cb filter;
-    ggml_backend_buffer_type_t secondary_buft = nullptr;
+
+    // resolved at construction; alloc_buffers() is reusable with a different n_rs_seq
     std::vector<ggml_backend_buffer_type_t> layer_buft; // one entry per model layer, null when skipped
 
     void alloc_buffers();

@@ -309,7 +309,8 @@ private:
         ggml_backend_buffer_type_t pinned_buffer_type = nullptr;
         size_t pinned_bytes = 0;
         size_t arena_bytes = 0;
-        size_t arena_total_bytes = 0;
+        uint64_t arena_total_bytes = 0;
+        size_t minimum_stage_bytes = 0;
         size_t page_bytes = 0;
         size_t conversion_bytes = 0;
         uint32_t layer_count = 0;
