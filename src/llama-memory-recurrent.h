@@ -4,6 +4,7 @@
 #include "llama-graph.h"
 #include "llama-memory.h"
 
+#include <functional>
 #include <map>
 #include <set>
 #include <vector>
@@ -120,6 +121,16 @@ private:
     const llama_hparams & hparams;
 
     const uint32_t n_seq_max = 1;
+
+    // kept so the buffers can be rebuilt at runtime
+    ggml_type type_r = GGML_TYPE_F32;
+    ggml_type type_s = GGML_TYPE_F32;
+    bool offload = true;
+    layer_filter_cb filter;
+    ggml_backend_buffer_type_t secondary_buft = nullptr;
+    std::vector<ggml_backend_buffer_type_t> layer_buft; // one entry per model layer, null when skipped
+
+    void alloc_buffers();
 
     // ggml contexts for the KV cache along with the allocated backend buffers:
     std::vector<std::pair<ggml_context_ptr, ggml_backend_buffer_ptr>> ctxs_bufs;

@@ -17,29 +17,9 @@
 // llama_memory_recurrent
 //
 
-llama_memory_recurrent::llama_memory_recurrent(
-        const llama_model & model,
-                ggml_type   type_r,
-                ggml_type   type_s,
-                     bool   offload,
-                 uint32_t   mem_size,
-                 uint32_t   n_seq_max,
-                 uint32_t   n_rs_seq,
-    const layer_filter_cb & filter,
-    ggml_backend_buffer_type_t secondary_buft) : hparams(model.hparams), n_seq_max(n_seq_max) {
+void llama_memory_recurrent::alloc_buffers() {
     const int32_t n_layer = hparams.n_layer();
 
-    head = 0;
-    size = mem_size;
-    used = 0;
-
-    this->n_rs_seq = n_rs_seq;
-    rs_idx.assign(n_seq_max, 0);
-
-    cells.clear();
-    cells.resize(mem_size);
-
-    // define a comparator for the buft -> ctx map to ensure that the order is well-defined:
     struct ggml_backend_buft_comparator {
         bool operator()(const ggml_backend_buffer_type_t & lhs, const ggml_backend_buffer_type_t & rhs) const {
             return strcmp(ggml_backend_buft_name(lhs), ggml_backend_buft_name(rhs)) < 0;
@@ -47,64 +27,40 @@ llama_memory_recurrent::llama_memory_recurrent(
     };
     std::map<ggml_backend_buffer_type_t, ggml_context_ptr, ggml_backend_buft_comparator> ctx_map;
 
-    // create a context for each buffer type
     auto ctx_for_buft = [&](ggml_backend_buffer_type_t buft) -> ggml_context * {
         auto it = ctx_map.find(buft);
         if (it == ctx_map.end()) {
             ggml_init_params params = {
-                // r and s per layer, plus the separate PLE conv row where the model has one
                 /*.mem_size   =*/ size_t((hparams.ple_conv_state() > 0 ? 3u : 2u)*n_layer*ggml_tensor_overhead()),
                 /*.mem_buffer =*/ NULL,
                 /*.no_alloc   =*/ true,
             };
-
             ggml_context * ctx = ggml_init(params);
             if (!ctx) {
                 return nullptr;
             }
-
             ctx_map.emplace(buft, ctx);
-
             return ctx;
         }
-
         return it->second.get();
     };
 
-    r_l.resize(n_layer);
-    s_l.resize(n_layer);
-    p_l.resize(n_layer);
+    r_l.assign(n_layer, nullptr);
+    s_l.assign(n_layer, nullptr);
+    p_l.assign(n_layer, nullptr);
 
     for (int i = 0; i < n_layer; i++) {
-        if (filter && !filter(i)) {
-            LLAMA_LOG_DEBUG("%s: layer %3d: skipped\n", __func__, i);
+        ggml_backend_buffer_type_t buft = layer_buft[i];
+        if (buft == nullptr) {
             continue;
         }
-
-        const char * dev_name = "CPU";
-
-        ggml_backend_buffer_type_t buft = ggml_backend_cpu_buffer_type();
-
-        if (offload) {
-            auto * dev = model.dev_layer(i);
-            buft = ggml_backend_dev_buffer_type(dev);
-
-            dev_name = ggml_backend_dev_name(dev);
-        }
-
-        if (secondary_buft != nullptr) {
-            buft = secondary_buft;
-            dev_name = ggml_backend_buft_name(buft);
-        }
-
-        LLAMA_LOG_DEBUG("%s, layer %3d: dev = %s\n", __func__, i, dev_name);
 
         ggml_context * ctx = ctx_for_buft(buft);
         if (!ctx) {
             throw std::runtime_error("failed to create ggml context for rs cache");
         }
 
-        const uint32_t n_rows = mem_size * (1 + n_rs_seq);
+        const uint32_t n_rows = size * (1 + n_rs_seq);
         ggml_tensor * r = ggml_new_tensor_2d(ctx, type_r, hparams.n_embd_r(), n_rows);
         ggml_tensor * s = ggml_new_tensor_2d(ctx, type_s, hparams.n_embd_s(), n_rows);
         ggml_format_name(r, "cache_r_l%d", i);
@@ -112,7 +68,6 @@ llama_memory_recurrent::llama_memory_recurrent(
         r_l[i] = r;
         s_l[i] = s;
 
-        // the PLE history needs its own row: Meta must mirror it while the delta-net conv state next door stays split
         if (hparams.ple_conv_state() > 0 && hparams.is_ple(i)) {
             ggml_tensor * p = ggml_new_tensor_2d(ctx, type_r, hparams.ple_conv_state(), n_rows);
             ggml_format_name(p, "cache_ple_r_l%d", i);
@@ -120,7 +75,6 @@ llama_memory_recurrent::llama_memory_recurrent(
         }
     }
 
-    // allocate tensors and initialize the buffers to avoid NaNs in the padding
     for (auto & [buft, ctx] : ctx_map) {
         ggml_backend_buffer_t buf = ggml_backend_alloc_ctx_tensors_from_buft(ctx.get(), buft);
         if (!buf) {
@@ -137,11 +91,56 @@ llama_memory_recurrent::llama_memory_recurrent(
         const size_t memory_size_p = size_p_bytes();
 
         LLAMA_LOG_INFO("%s: size = %7.2f MiB (%6u cells, %3d layers, %2u seqs %2u rs_seq), R (%s): %7.2f MiB, S (%s): %7.2f MiB, P (%s): %7.2f MiB\n", __func__,
-                (float)(memory_size_r + memory_size_s + memory_size_p) / (1024.0f * 1024.0f), mem_size, n_layer, n_seq_max, n_rs_seq,
+                (float)(memory_size_r + memory_size_s + memory_size_p) / (1024.0f * 1024.0f), size, n_layer, n_seq_max, n_rs_seq,
                 ggml_type_name(type_r), (float)memory_size_r / (1024.0f * 1024.0f),
                 ggml_type_name(type_s), (float)memory_size_s / (1024.0f * 1024.0f),
                 ggml_type_name(type_r), (float)memory_size_p / (1024.0f * 1024.0f));
     }
+}
+
+llama_memory_recurrent::llama_memory_recurrent(
+        const llama_model & model,
+                ggml_type   type_r,
+                ggml_type   type_s,
+                     bool   offload,
+                 uint32_t   mem_size,
+                 uint32_t   n_seq_max,
+                 uint32_t   n_rs_seq,
+    const layer_filter_cb & filter,
+    ggml_backend_buffer_type_t secondary_buft) : hparams(model.hparams), n_seq_max(n_seq_max) {
+    head = 0;
+    size = mem_size;
+    used = 0;
+
+    this->n_rs_seq = n_rs_seq;
+    rs_idx.assign(n_seq_max, 0);
+
+    cells.clear();
+    cells.resize(mem_size);
+
+    this->type_r = type_r;
+    this->type_s = type_s;
+    this->offload = offload;
+    this->filter = filter;
+    this->secondary_buft = secondary_buft;
+
+    const int32_t n_layer = hparams.n_layer();
+    layer_buft.assign(n_layer, nullptr);
+    for (int i = 0; i < n_layer; i++) {
+        if (filter && !filter(i)) {
+            continue;
+        }
+        if (offload) {
+            layer_buft[i] = ggml_backend_dev_buffer_type(model.dev_layer(i));
+        } else {
+            layer_buft[i] = ggml_backend_cpu_buffer_type();
+        }
+        if (secondary_buft != nullptr) {
+            layer_buft[i] = secondary_buft;
+        }
+    }
+
+    alloc_buffers();
 }
 
 void llama_memory_recurrent::clear(bool data) {
