@@ -11,7 +11,7 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
-          ref: feature/adaptive-kv-stream
+          ref: feature/adaptive-kv-stream # Ensure this matches your exact feature branch name
 
       - name: Verify Adaptive KV source
         shell: pwsh
@@ -20,7 +20,7 @@ jobs:
           $matches = Get-ChildItem -Path . -Recurse -File |
             Select-String "kv-stream-stage-mib" -ErrorAction SilentlyContinue
           if (-not $matches) {
-            throw "ERROR: Adaptive KV source was not found in this repository."
+            throw "ERROR: Adaptive KV source was not found in this repository branch."
           }
           Write-Host "Adaptive KV source found:"
           $matches | Select-Object -First 10 | ForEach-Object {
@@ -50,6 +50,7 @@ jobs:
           }
           $env:PATH = "${{ steps.cuda.outputs.CUDA_PATH }}\bin;" + $env:PATH
           cmake -S . -B build `
+            -G Ninja `
             -DGGML_CUDA=ON `
             -DGGML_CUDA_FA_ALL_QUANTS=ON `
             -DCMAKE_CUDA_ARCHITECTURES="120" `
@@ -60,28 +61,26 @@ jobs:
         run: |
           $env:PATH = "${{ steps.cuda.outputs.CUDA_PATH }}\bin;" + $env:PATH
           cmake --build build `
-            --config Release `
             --target llama-server `
             -j 4
 
       - name: Verify Adaptive KV in compiled binary
         shell: pwsh
         run: |
-          # Add CUDA DLLs to PATH so Windows can load dynamic libraries at execution
+          # Add CUDA DLLs to PATH so dynamic library loader finds them
           $env:PATH = "${{ steps.cuda.outputs.CUDA_PATH }}\bin;" + $env:PATH
 
           Write-Host "Latest commit on runner:"
           git log -1 --oneline
 
-          $server = ".\build\bin\Release\llama-server.exe"
+          $server = ".\build\bin\llama-server.exe"
           if (-not (Test-Path $server)) {
-            $server = ".\build\bin\llama-server.exe"
+            $server = ".\build\bin\Release\llama-server.exe"
           }
           if (-not (Test-Path $server)) {
             throw "ERROR: llama-server.exe was not found in build directory."
           }
 
-          # Redirect standard output/error to file to capture startup DLL failure logs
           $p = Start-Process -FilePath $server -ArgumentList "--help" -NoNewWindow -Wait -PassThru -RedirectStandardOutput "out.txt" -RedirectStandardError "err.txt"
 
           Write-Host "Process Exit Code: $($p.ExitCode)"
@@ -91,7 +90,7 @@ jobs:
           if ($p.ExitCode -ne 0 -and -not $out) {
             Write-Host "--- STDERR OUTPUT ---"
             Write-Host $err
-            throw "ERROR: llama-server.exe failed to run (Exit code $($p.ExitCode)). Check CUDA DLL paths."
+            throw "ERROR: llama-server.exe failed to run (Exit code $($p.ExitCode))."
           }
 
           if ($out -notmatch "kv-stream-stage-mib" -and $err -notmatch "kv-stream-stage-mib") {
@@ -102,16 +101,14 @@ jobs:
             throw "ERROR: --kv-stream-stage-mib flag is NOT present in the compiled binary."
           }
 
-          Write-Host "SUCCESS!"
-          Write-Host "Adaptive KV streaming flag '--kv-stream-stage-mib' confirmed in compiled llama-server."
+          Write-Host "SUCCESS: Adaptive KV flag confirmed in compiled binary!"
 
       - name: Bundle CUDA Runtime DLLs
         shell: pwsh
         run: |
-          $targetDir = Get-Item "build\bin\Release", "build\bin" | Where-Object { Test-Path $_ } | Select-Object -First 1
+          $targetDir = Get-Item "build\bin", "build\bin\Release" | Where-Object { Test-Path $_ } | Select-Object -First 1
           $cudaBin = "${{ steps.cuda.outputs.CUDA_PATH }}\bin"
           
-          # Copy essential CUDA runtime DLLs alongside executable for direct distribution
           Get-ChildItem -Path $cudaBin -Filter "cudart64_*.dll" | ForEach-Object {
             Copy-Item $_.FullName -Destination $targetDir.FullName -Force
           }
@@ -124,7 +121,7 @@ jobs:
         with:
           name: llama-server-windows-sm120-cu128-adaptive-kv
           path: |
-            build/bin/Release/llama-server.exe
-            build/bin/Release/*.dll
             build/bin/llama-server.exe
             build/bin/*.dll
+            build/bin/Release/llama-server.exe
+            build/bin/Release/*.dll
