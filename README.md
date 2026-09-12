@@ -21,7 +21,7 @@ cache), `-ngl 99`, `--flash-attn on`, and `--parallel 1`.
 
 Raymond's phase-arena branch (no speculative decoding) against this fork with
 MTP, each at the largest `--kv-stream-arena-mib` that loads on the 16 GB card
-(3072 MiB upstream, 3264 MiB fork). Both run `--ctx-size 160000`; the prompt is a
+(3072 MiB upstream, 3264 MiB fork[^arena-pin]). Both run `--ctx-size 160000`; the prompt is a
 source tree followed by a review instruction, with 256 tokens generated at
 temperature 0.
 
@@ -40,6 +40,14 @@ shrinks from 14.8% to 3.2% as the context grows and the decode-side share of
 the total drops. Reproduce with `benchmarks/benchmark_upstream_vs_mtp.py`; the
 sweep writes `results.jsonl`/`results.csv` plus a four-panel PNG/SVG under
 `benchmarks/results/`.
+
+[^arena-pin]: The fork's MTP work adds a pinned region inside the phase arena:
+on this hybrid SSM model the recurrent-state cache (~150 MiB), the MTP draft
+weights, and the MTP KV cache all come from it, while upstream allocates the
+recurrent-state cache as a separate `cudaMalloc` on top of the arena. At a given
+arena size the fork's total VRAM is therefore lower, which lets it run a larger
+arena on the same 16 GB card. The cost is internal: the pin takes KV-window
+budget, which the dynamic eject controller manages.
 
 ### MTP-active window
 
