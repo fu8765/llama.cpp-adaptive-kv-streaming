@@ -1279,6 +1279,9 @@ bool llama_context::kv_stream_mtp_set(bool mtp_active) {
     if (!kv_stream_phase_arena.configured) {
         return false;
     }
+    if (mtp_active && !spec_mtp_configured) {
+        return false;
+    }
     if (cparams.spec_mtp == mtp_active) {
         return true;
     }
@@ -1313,6 +1316,8 @@ bool llama_context::kv_stream_mtp_set(bool mtp_active) {
                 kv_stream_phase_arena.arena_total_bytes - new_pinned;
         });
     if (!ok) {
+        sched_need_reserve = true;
+        sched_reserve();
         return false;
     }
 
