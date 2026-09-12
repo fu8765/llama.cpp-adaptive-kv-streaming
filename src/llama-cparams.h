@@ -60,6 +60,8 @@ struct llama_cparams {
     size_t   mtp_weights_bytes;
     uint32_t kv_stream_mtp_kv_pages;
     bool     kv_stream_mtp_dynamic;
+    ggml_type mtp_kv_type_k;
+    ggml_type mtp_kv_type_v;
 
     std::vector<bool> embeddings_layer_inp; // [n_layer()] extract input embeddings for layer
 

@@ -67,6 +67,26 @@ The full-context pin reserves MTP KV for the whole context, which squeezes the
 decode pool and shrinks the window where MTP stays active. Sizing the pin to the
 decode window instead roughly doubles that window at `--ctx-size 160000`.
 
+### MTP KV quantization
+
+The MTP draft KV defaults to F16 and does not inherit the target `-ctk`/`-ctv`.
+Pass `-ctkd`/`-ctvd` to quantize it. The automatic pin now sizes the pinned MTP
+KV from the draft types, so the saved bytes become decode window:
+
+| MTP KV type | MTP KV pin | decode window |
+|---|---|---|
+| F16 | 164 pages / 41984 tokens | 164 pages |
+| q8_0 K / q4_0 V | 178 pages / 45568 tokens | 178 pages |
+| q4_0 K / q4_0 V | 182 pages / 46592 tokens | 181 pages |
+
+Measured at arena 3072, ctx 160000, ub 256, auto pin. The window grows by 14 to
+18 pages, which moves the MTP crossover from about 39K to about 42K tokens.
+Prefill loses 1.5 to 4 percent versus F16. Quantizing shrinks the pin, so the
+shared arena compute region grows and the init peak rises: at arena 3264 the MTP
+context can fail to allocate its compute buffer. Details and the throughput
+table are in
+[docs/next-steps/01-mtp-kv-quantization.md](docs/next-steps/01-mtp-kv-quantization.md).
+
 ## Differences from upstream
 
 ### Phase arena: speculative verify batches
@@ -205,9 +225,10 @@ the model leaves.
 
 ## Next steps
 
-Planned work, not implemented on this branch:
+Task 1 is implemented on `feature/mtp-next-steps`; tasks 2 and 3 are still
+planned.
 
-- [Quantize the MTP draft KV cache](docs/next-steps/01-mtp-kv-quantization.md): make the automatic pin track `-ctkd`/`-ctvd` so the freed KV becomes decode window.
+- [Quantize the MTP draft KV cache](docs/next-steps/01-mtp-kv-quantization.md): make the automatic pin track `-ctkd`/`-ctvd` so the freed KV becomes decode window. Implemented; see the MTP KV quantization results above.
 - [Keep MTP active while streaming](docs/next-steps/02-mtp-during-streaming.md): eject on measured copy pressure instead of streaming onset.
 - [Enable DFlash2](docs/next-steps/03-dflash2-draft.md): build a vocabulary-matching draft for the condensed target and generalize the pin and eject path.
 
@@ -222,6 +243,10 @@ Planned work, not implemented on this branch:
   full-vocabulary DFlash2 draft (248320 tokens): the draft has no token
   embedding and embeds through the target's `token_embd`.
 - ngram-map and ngram-simple currently produce zero drafts in this configuration.
+- Quantizing the MTP draft KV (`-ctkd`/`-ctvd`) shrinks the pin, which grows the
+  arena compute side and raises the init peak. At arena 3264 with `-ub 256` this
+  can fail to allocate the MTP context's compute buffer. Use arena 3072 or
+  `-ub 128` at 3264 for now.
 - Research code, no upstream guarantees.
 
 ## Upstream

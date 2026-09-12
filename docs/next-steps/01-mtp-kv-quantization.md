@@ -39,43 +39,87 @@ Pin breakdown at the same settings: MTP KV 190.00 MiB + MTP draft weights
 609.8 MiB + recurrent rows 598.5 MiB (4 rows, 149.6 MiB each;
 `CUDA_Phase_Arena0 RS buffer size = 598.50 MiB`) = 1398.30 MiB.
 
-The earlier report that `-ctkd`/`-ctvd` increased VRAM did not reproduce. The
-after-decode figures above are within noise. The "increase" was most likely a
-measurement taken at a different point: the arena allocates on first decode,
-so a reading taken when `/health` first returns can show roughly 3 GiB less
-than the settled figure.
+The earlier report that `-ctkd`/`-ctvd` increased VRAM was real, but it is a
+transient init peak, not a steady-state increase. Quantizing the MTP KV shrinks
+the pin, so at a fixed arena the shared arena compute region grows. The MTP
+context commits that larger region in `sched_reserve`, which raises the peak
+during init. At arena 3264 this peak OOMs on the MTP context's ~209 MiB compute
+buffer (`failed to create MTP context`). Once the server is up, total VRAM at a
+fixed arena is the same as F16.
 
 ## Work items
 
-1. Plumb the MTP KV types into the target context params.
-   `common_context_params_to_llama` already sets `cparams.spec_mtp`
-   (common/common.cpp:1764); add `mtp_kv_type_k`/`mtp_kv_type_v` from
-   `params.speculative.draft.cache_type_k/v` and carry them through
-   `llama_context_params` (include/llama.h) and `llama_cparams`
-   (src/llama-cparams.h).
-2. In `kv_stream_pinned_bytes_for()` (src/llama-context.cpp:85-120) compute the
-   MTP KV term from the actual types, K and V separately, with per-row block
-   rounding (`ggml_blck_size`). Prefer the KV cache's own size accounting if one
-   is reachable instead of duplicating the layout math.
-3. Assert in debug that the types used for the pin match the draft context's KV
-   cache types.
-4. Optionally expose the MTP KV types in `llama_kv_stream_status` for the
-   server log and the README.
+1. Plumb the MTP KV types into the target context params. Done:
+   `mtp_kv_type_k`/`mtp_kv_type_v` added to `llama_context_params`
+   (include/llama.h) and `llama_cparams` (src/llama-cparams.h), copied in the
+   context constructor, and set from `params.speculative.draft.cache_type_k/v`
+   in `common_context_params_to_llama()` (common/common.cpp).
+2. Size the pin from the actual types. Done: `mtp_kv_bytes_per_token()` in
+   src/llama-context.cpp returns
+   `ggml_row_size(type_k, n_embd_k_gqa) + ggml_row_size(type_v, n_embd_v_gqa)`
+   for the nextn layer and replaces the F16 expression in both
+   `kv_stream_pinned_bytes_for()` and `kv_stream_mtp_kv_cap_apply()`.
+3. Debug-assert that the pin types match the draft context's KV cache types.
+   Not done. The draft context is created after the target, so the target cannot
+   inspect it; both use the same common params, so the types agree by
+   construction.
+4. Expose the MTP KV types in `llama_kv_stream_status`. Not done, optional.
 
-## Test plan
+## Outcome
 
-- Re-run the three-way probe above. Expect `pinned` to drop by ~113 MiB
-  (q8_0/q4_0) or ~137 MiB (q4_0/q4_0) and the auto cap to pick a larger decode
-  window. At ~6.5 MiB per target decode page that is roughly +17 to +21 pages.
-- Measure TG and PP at 20/40/80/120/160K for MTP KV F16 vs q8_0/q4_0 vs
-  q4_0/q4_0 and record the new crossover.
-- Correctness: greedy output on a fixed prompt should match the F16 MTP KV run;
-  watch the speculative acceptance rate for a regression.
+Measured on `feature/mtp-next-steps`, arena 3072, ctx 160000, ub 256, auto pin.
+The three-way probe now shows the pin tracking the types:
+
+| MTP KV type | MTP KV pin | decode window |
+|---|---|---|
+| F16 | 164 pages / 41984 tokens | 164 pages |
+| q8_0 K / q4_0 V | 178 pages / 45568 tokens | 178 pages |
+| q4_0 K / q4_0 V | 182 pages / 46592 tokens | 181 pages |
+
+Decode throughput across the crossovers (ejected rows in italics in the raw
+CSV; a dash means MTP is still active and the run is the fast path):
+
+| prompt | F16 decode | q8_0/q4_0 decode | q4_0/q4_0 decode |
+|---:|---:|---:|---:|
+| 38000 | 45.7 | 57.1 | 57.2 |
+| 40000 | 23.3 (ejected) | 56.3 | 56.3 |
+| 44000 | 22.8 | 22.9 (ejected) | 22.9 (ejected) |
+| 48000 | 22.5 | 22.4 | 22.5 |
+| 80000 | 19.6 | 19.6 | 19.6 |
+| 160000 | 12.2 | 12.0 | 12.0 |
+
+The window grows by 14 to 18 pages, but the crossover only moves from about
+39K to about 42K tokens (roughly one context step). The eject trigger fires
+before the full window is used, so the extra pages do not translate one to one
+into a later crossover. Prefill loses 1.5 to 4 percent versus F16. The F16
+38000 decode row is an outlier; it sits at the edge of the arena and is not a
+clean baseline.
+
+Arena 3072 was used because arena 3264 plus a quantized MTP KV hits the init
+peak above. The same sweep can run at arena 3264 with `-ub 128`.
+
+## Known limitation
+
+The MTP context has no arena of its own (`kv_stream_arena_mib = 0` for the
+draft). Its KV and weights come from the pinned region inside the target arena,
+but its compute buffers are a separate `cudaMalloc`. Shrinking the pin enlarges
+the arena compute side, so the init peak rises. At arena 3264 with `-ub 256`
+this can fail to allocate the MTP context's compute buffer
+(`failed to create MTP context`). The failure is not deterministic: the same
+config can start. Workarounds are arena 3072, or arena 3264 with `-ub 128`.
+Fixing it properly means either capping the MTP prefill catch-up batch (the
+buffer scales with it) or routing the MTP compute into the target arena, which
+now has room because the pin shrank.
 
 ## Acceptance
 
-- Pin tracks the actual MTP KV type; the freed bytes become window.
-- No TG regression and no output drift versus the F16 MTP KV baseline.
+- Pin tracks the actual MTP KV type; the freed bytes become window. Met.
+- No TG regression versus the F16 MTP KV baseline. Met while MTP is active;
+  decode is equal to or better than F16 at every context.
+- No output drift versus the F16 MTP KV baseline. Not yet checked. The
+  speculative acceptance rate and a greedy output comparison still need a run.
+- The init-peak OOM is not fixed. It is currently avoided by arena 3072, not
+  solved.
 
 ## Risks and levers
 

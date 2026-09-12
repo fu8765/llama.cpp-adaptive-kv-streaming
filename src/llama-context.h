@@ -346,6 +346,7 @@ private:
     uint32_t spec_n_max_spec_draft = 0;
     uint32_t spec_mtp_kv_tokens = 0;
 
+    uint64_t mtp_kv_bytes_per_token() const;
     uint64_t kv_stream_pinned_bytes_for(bool mtp_active) const;
 
     // size the MTP KV pin to the decode window; used when dynamic MTP owns the pin

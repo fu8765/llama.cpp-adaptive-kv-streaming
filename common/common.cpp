@@ -1764,6 +1764,8 @@ struct llama_context_params common_context_params_to_llama(const common_params &
     cparams.spec_mtp = std::find(
         params.speculative.types.begin(), params.speculative.types.end(),
         COMMON_SPECULATIVE_TYPE_DRAFT_MTP) != params.speculative.types.end();
+    cparams.mtp_kv_type_k = params.speculative.draft.cache_type_k;
+    cparams.mtp_kv_type_v = params.speculative.draft.cache_type_v;
     cparams.mtp_weights_bytes = 0;
     if (cparams.spec_mtp && params.speculative.has_dft()) {
         std::error_code ec;

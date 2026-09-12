@@ -408,6 +408,8 @@ extern "C" {
         size_t   mtp_weights_bytes;   // arena space reserved for the MTP draft weights, 0 = none [EXPERIMENTAL]
         uint32_t kv_stream_mtp_kv_pages; // pinned MTP KV pages, 0 = pin the MTP-active decode window [EXPERIMENTAL]
         bool     kv_stream_mtp_dynamic;  // dynamic MTP eject and re-enable is enabled [EXPERIMENTAL]
+        enum ggml_type mtp_kv_type_k; // MTP draft KV cache data type for K, used to size the pin [EXPERIMENTAL]
+        enum ggml_type mtp_kv_type_v; // MTP draft KV cache data type for V, used to size the pin [EXPERIMENTAL]
 
         // Abort callback
         // if it returns true, execution of llama_decode() will be aborted

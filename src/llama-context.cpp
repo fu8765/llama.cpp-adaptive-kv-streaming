@@ -82,6 +82,13 @@ static const llm_fused_op_probe llm_fused_op_dsv4_hc_post_probe = {
     /*.n_tokens_per_seq =*/ 1,
 };
 
+uint64_t llama_context::mtp_kv_bytes_per_token() const {
+    const auto & hparams = model.hparams;
+    const uint32_t il = hparams.n_layer();
+    return uint64_t(ggml_row_size(cparams.mtp_kv_type_k, hparams.n_embd_k_gqa(il)))
+         + uint64_t(ggml_row_size(cparams.mtp_kv_type_v, hparams.n_embd_v_gqa(il)));
+}
+
 uint64_t llama_context::kv_stream_pinned_bytes_for(bool mtp_active) const {
     const auto & hparams = model.hparams;
 
@@ -92,9 +99,7 @@ uint64_t llama_context::kv_stream_pinned_bytes_for(bool mtp_active) const {
     uint64_t pinned = 0;
 
     if (mtp_active && hparams.n_layer_nextn > 0) {
-        const uint32_t il = hparams.n_layer();
-        const uint64_t per_token =
-            uint64_t(hparams.n_embd_k_gqa(il) + hparams.n_embd_v_gqa(il))*ggml_type_size(GGML_TYPE_F16);
+        const uint64_t per_token = mtp_kv_bytes_per_token();
         pinned += (per_token*spec_mtp_kv_tokens + 127ULL) & ~127ULL;
     }
     if (mtp_active) {
@@ -163,6 +168,8 @@ llama_context::llama_context(
     cparams.mtp_weights_bytes       = params.mtp_weights_bytes;
     cparams.kv_stream_mtp_kv_pages  = params.kv_stream_mtp_kv_pages;
     cparams.kv_stream_mtp_dynamic   = params.kv_stream_mtp_dynamic;
+    cparams.mtp_kv_type_k           = params.mtp_kv_type_k;
+    cparams.mtp_kv_type_v           = params.mtp_kv_type_v;
     cparams.no_perf                 = params.no_perf;
     cparams.warmup                  = false;
 
@@ -1349,9 +1356,7 @@ bool llama_context::kv_stream_mtp_kv_cap_apply() {
     }
 
     // pinned page p costs a bytes and frees a/S decode pages, S = bytes per decode page
-    const uint32_t il = model.hparams.n_layer();
-    const uint64_t per_token =
-        uint64_t(model.hparams.n_embd_k_gqa(il) + model.hparams.n_embd_v_gqa(il))*ggml_type_size(GGML_TYPE_F16);
+    const uint64_t per_token = mtp_kv_bytes_per_token();
     const uint64_t a = 256ULL*per_token;
     const uint64_t S = uint64_t(arena.page_bytes)*arena.layer_count;
 
@@ -4506,6 +4511,8 @@ llama_context_params llama_context_default_params() {
         /*.mtp_weights_bytes          =*/ 0,
         /*.kv_stream_mtp_kv_pages     =*/ 0,
         /*.kv_stream_mtp_dynamic      =*/ false,
+        /*.mtp_kv_type_k               =*/ GGML_TYPE_F16,
+        /*.mtp_kv_type_v               =*/ GGML_TYPE_F16,
         /*.abort_callback              =*/ nullptr,
         /*.abort_callback_data         =*/ nullptr,
         /*.embeddings                  =*/ false,
