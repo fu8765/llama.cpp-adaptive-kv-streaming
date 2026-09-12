@@ -62,6 +62,8 @@ struct llama_context {
 
     ggml_backend_buffer_type_t get_kv_stream_pinned_buft() const;
 
+    bool kv_stream_mtp_set(bool mtp_active);
+
     ggml_backend_sched_t get_sched() const;
 
     uint32_t n_ctx()     const;

@@ -605,6 +605,10 @@ extern "C" {
     // buffer type backing the KV-stream phase arena pinned region of ctx (NULL if none)
     LLAMA_API ggml_backend_buffer_type_t llama_kv_stream_pinned_buft(struct llama_context * ctx);
 
+    // Reconfigure the phase arena between the MTP-reserved and MTP-free layouts.
+    // Setting false requires the MTP context and draft model to be destroyed first.
+    LLAMA_API bool llama_kv_stream_mtp_set(struct llama_context * ctx, bool mtp_active);
+
     // Get the model's RoPE frequency scaling factor
     LLAMA_API float llama_model_rope_freq_scale_train(const struct llama_model * model);
 

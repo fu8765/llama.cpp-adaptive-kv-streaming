@@ -1262,6 +1262,12 @@ ggml_backend_buffer_type_t llama_context::get_kv_stream_pinned_buft() const {
     return kv_stream_phase_arena.pinned_buffer_type;
 }
 
+bool llama_context::kv_stream_mtp_set(bool mtp_active) {
+    // replaced in Task 5
+    (void) mtp_active;
+    return false;
+}
+
 ggml_backend_sched_t llama_context::get_sched() const {
     return sched.get();
 }
@@ -4903,4 +4909,8 @@ llama_context * llama_get_ctx_other(struct llama_context * ctx) {
 
 ggml_backend_buffer_type_t llama_kv_stream_pinned_buft(struct llama_context * ctx) {
     return ctx->get_kv_stream_pinned_buft();
+}
+
+bool llama_kv_stream_mtp_set(llama_context * ctx, bool mtp_active) {
+    return ctx->kv_stream_mtp_set(mtp_active);
 }
