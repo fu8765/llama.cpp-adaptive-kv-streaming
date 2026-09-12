@@ -2845,6 +2845,13 @@ private:
             return;
         }
 
+        // track the largest resident footprint seen while MTP is active, so the
+        // re-enable margin compares against the decode layout, not the prefill slab
+        if (!mtp_ejected) {
+            mtp_resident_pages_capture = std::max(mtp_resident_pages_capture, st.resident_pages_per_layer);
+            mtp_capture_valid = mtp_resident_pages_capture > 0;
+        }
+
         const uint64_t eject_bytes = uint64_t(std::max(0, params_base.speculative.kv_stream_mtp_eject_mib))*1024ull*1024ull;
 
         if (!mtp_ejected) {
@@ -2885,8 +2892,7 @@ private:
         if (!llama_kv_stream_get_status(ctx_tgt, &st)) {
             return false;
         }
-        mtp_resident_pages_capture = st.resident_pages_per_layer;
-        mtp_capture_valid = true;
+        mtp_capture_valid = mtp_resident_pages_capture > 0;
 
         for (auto & slot : slots) {
             slot.spec_draft.clear();
@@ -2907,7 +2913,7 @@ private:
 
         llama_kv_stream_status st2 = {};
         if (llama_kv_stream_get_status(ctx_tgt, &st2)) {
-            SRV_INF("MTP ejected, pool free = %llu bytes\n", (unsigned long long) st2.pool_free_bytes);
+            SRV_INF("MTP ejected, resident capacity = %u pages/layer, pool free = %llu bytes\n", (unsigned) mtp_resident_pages_capture, (unsigned long long) st2.pool_free_bytes);
         }
         return true;
     }
@@ -2936,6 +2942,8 @@ private:
         }
         spec_rewire_slots(true);
         mtp_ejected = false;
+        mtp_resident_pages_capture = 0;
+        mtp_capture_valid = false;
         SRV_INF("%s", "MTP re-enabled\n");
         return true;
     }
