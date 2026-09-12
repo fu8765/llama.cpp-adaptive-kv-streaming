@@ -916,8 +916,9 @@ private:
     // dynamic KV-stream MTP control
     bool     spec_mtp_enabled_dynamic = false;
     bool     mtp_ejected = false;
+    bool     mtp_last_batch_generation = false; // previous decoded batch was a generation batch
     uint32_t mtp_stable = 0;
-    uint32_t mtp_resident_pages_capture = 0;
+    uint32_t mtp_capacity_pages = 0; // running max MTP-active decode capacity, pages/layer
 
     std::unique_ptr<server_prompt_cache> prompt_cache;
 
@@ -2834,6 +2835,12 @@ private:
         if (!spec_mtp_enabled_dynamic || ctx_tgt == nullptr) {
             return;
         }
+        // only generation observations drive the controller: a prompt batch has a
+        // small resident capacity (large compute slab) and would corrupt the capture
+        if (!mtp_last_batch_generation) {
+            mtp_stable = 0;
+            return;
+        }
 
         llama_kv_stream_status st = {};
         if (!llama_kv_stream_get_status(ctx_tgt, &st) || !st.enabled) {
@@ -2843,24 +2850,11 @@ private:
         const uint32_t stable_decodes = (uint32_t) std::max(1, params_base.speculative.kv_stream_mtp_stable_decodes);
 
         if (!mtp_ejected) {
-            // track the largest resident footprint seen while MTP is active; the
-            // decode layout (not the prefill slab) is the capacity to compare against
-            mtp_resident_pages_capture = std::max(mtp_resident_pages_capture, st.resident_pages_per_layer);
+            // running max over generation batches only; prefill never updates it
+            mtp_capacity_pages = std::max(mtp_capacity_pages, st.resident_pages_per_layer);
 
-            const uint64_t eject_bytes = uint64_t(std::max(0, params_base.speculative.kv_stream_mtp_eject_mib))*1024ull*1024ull;
-
-            // wait until an MTP-active decode layout has been observed
-            if (mtp_resident_pages_capture == 0) {
-                mtp_stable = 0;
-                return;
-            }
-            // the prefill layout advertises a small resident capacity, so the
-            // free-pool threshold is only meaningful once the decode layout is in
-            // effect; the active pages alone decide whether the set still fits
-            const bool over_capacity = st.active_pages > mtp_resident_pages_capture;
-            const bool pool_pressure = st.resident_pages_per_layer >= mtp_resident_pages_capture &&
-                                       st.pool_free_bytes <= eject_bytes;
-            if (!over_capacity && !pool_pressure) {
+            const int32_t eject_pages = std::max(0, params_base.speculative.kv_stream_mtp_eject_pages);
+            if ((int64_t) st.active_pages + eject_pages <= (int64_t) mtp_capacity_pages) {
                 mtp_stable = 0;
                 return;
             }
@@ -2873,15 +2867,12 @@ private:
             return;
         }
 
-        // ejected: re-enable only when the headroom MTP would have if active
-        // (ejected pool free minus the reservation it takes) is large enough
-        const uint64_t reenable_bytes = uint64_t(std::max(0, params_base.speculative.kv_stream_mtp_reenable_mib))*1024ull*1024ull;
-        const uint64_t projected_free = st.pool_free_bytes > st.mtp_reserved_bytes ? st.pool_free_bytes - st.mtp_reserved_bytes : 0;
-        // the ejected pool is much larger than the MTP-active one, so projected_free
-        // alone does not say whether the active set fits; also require the active
-        // pages to sit below the captured MTP-active decode capacity
-        if (st.streaming || st.mtp_reserved_bytes == 0 || projected_free < reenable_bytes ||
-                mtp_resident_pages_capture == 0 || st.active_pages >= mtp_resident_pages_capture) {
+        if (st.mtp_reserved_bytes == 0) {
+            mtp_stable = 0;
+            return;
+        }
+        const int32_t reenable_pages = std::max(0, params_base.speculative.kv_stream_mtp_reenable_pages);
+        if (mtp_capacity_pages == 0 || (int64_t) st.active_pages + reenable_pages > (int64_t) mtp_capacity_pages) {
             mtp_stable = 0;
             return;
         }
@@ -2921,7 +2912,7 @@ private:
 
         llama_kv_stream_status st2 = {};
         if (llama_kv_stream_get_status(ctx_tgt, &st2)) {
-            SRV_INF("MTP ejected, resident capacity = %u pages/layer, pool free = %llu bytes\n", (unsigned) mtp_resident_pages_capture, (unsigned long long) st2.pool_free_bytes);
+            SRV_INF("MTP ejected, decode capacity = %u pages/layer, active = %u pages, pool free = %llu bytes\n", (unsigned) mtp_capacity_pages, (unsigned) st.active_pages, (unsigned long long) st2.pool_free_bytes);
         }
         return true;
     }
@@ -2950,7 +2941,7 @@ private:
         }
         spec_rewire_slots(true);
         mtp_ejected = false;
-        mtp_resident_pages_capture = 0;
+        mtp_capacity_pages = 0;
         SRV_INF("%s", "MTP re-enabled\n");
         return true;
     }
@@ -3912,6 +3903,7 @@ private:
         } else {
             // success, apply batch metrics
             metrics_post_decode(off, batch_view.n_tokens, has_output);
+            mtp_last_batch_generation = decode_phase == LLAMA_DECODE_PHASE_GENERATION;
         }
 
         // TODO: avoid restoring the draft context and re-evaluating the drafted tokens when not needed [TAG_SPEC_AVOID_DRAFT_REEVAL]
