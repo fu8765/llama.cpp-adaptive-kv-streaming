@@ -1,4 +1,4 @@
-name: Build Adaptive KV llama-server (Blackwell sm120 - CUDA 13)
+name: Build Adaptive KV llama-server (Blackwell sm120)
 
 on:
   workflow_dispatch:
@@ -15,29 +15,30 @@ jobs:
         shell: pwsh
         run: |
           Write-Host "Checking repository for Adaptive KV support..."
-
           $matches = Get-ChildItem -Path . -Recurse -File |
             Select-String "kv-stream-stage-mib" -ErrorAction SilentlyContinue
-
           if (-not $matches) {
             throw "ERROR: Adaptive KV source was not found in this repository."
           }
-
           Write-Host "Adaptive KV source found:"
           $matches | Select-Object -First 10 | ForEach-Object {
             Write-Host "$($_.Path):$($_.LineNumber)"
           }
 
-      - name: Setup CUDA Toolkit 13.2
+      - name: Setup CUDA Toolkit 12.8
         id: cuda
-        uses: Jimver/cuda-toolkit@v0.2.36
+        uses: Jimver/cuda-toolkit@v0.2.21
         with:
-          cuda: '13.2.0'
+          cuda: '12.8.0'
+
+      - name: Setup Visual Studio Developer Environment
+        uses: ilammy/msvc-dev-cmd@v1
 
       - name: Show CUDA version
         shell: pwsh
         run: |
-          & "${{ steps.cuda.outputs.CUDA_PATH }}/bin/nvcc.exe" --version
+          $env:PATH = "${{ steps.cuda.outputs.CUDA_PATH }}\bin;" + $env:PATH
+          nvcc --version
 
       - name: Configure CMake
         shell: pwsh
@@ -45,17 +46,17 @@ jobs:
           if (Test-Path build) {
             Remove-Item -Recurse -Force build
           }
-
+          $env:PATH = "${{ steps.cuda.outputs.CUDA_PATH }}\bin;" + $env:PATH
           cmake -S . -B build `
             -DGGML_CUDA=ON `
             -DGGML_CUDA_FA_ALL_QUANTS=ON `
-            -DCMAKE_CUDA_ARCHITECTURES=120 `
-            -DCMAKE_CUDA_COMPILER="${{ steps.cuda.outputs.CUDA_PATH }}/bin/nvcc.exe" `
+            -DCMAKE_CUDA_ARCHITECTURES="120" `
             -DCMAKE_BUILD_TYPE=Release
 
       - name: Build llama-server
         shell: pwsh
         run: |
+          $env:PATH = "${{ steps.cuda.outputs.CUDA_PATH }}\bin;" + $env:PATH
           cmake --build build `
             --config Release `
             --target llama-server `
@@ -64,32 +65,64 @@ jobs:
       - name: Verify Adaptive KV in compiled binary
         shell: pwsh
         run: |
-          $server = ".\build\bin\Release\llama-server.exe"
+          # Add CUDA DLLs to PATH so Windows can load dynamic libraries at execution
+          $env:PATH = "${{ steps.cuda.outputs.CUDA_PATH }}\bin;" + $env:PATH
 
+          Write-Host "Latest commit on runner:"
+          git log -1 --oneline
+
+          $server = ".\build\bin\Release\llama-server.exe"
           if (-not (Test-Path $server)) {
-            throw "ERROR: llama-server.exe was not produced."
+            $server = ".\build\bin\llama-server.exe"
+          }
+          if (-not (Test-Path $server)) {
+            throw "ERROR: llama-server.exe was not found in build directory."
           }
 
-          Write-Host ""
-          Write-Host "Checking compiled llama-server for Adaptive KV support..."
-          Write-Host ""
+          # Redirect standard output/error to file to capture startup DLL failure logs
+          $p = Start-Process -FilePath $server -ArgumentList "--help" -NoNewWindow -Wait -PassThru -RedirectStandardOutput "out.txt" -RedirectStandardError "err.txt"
 
-          $help = & $server --help 2>&1 | Out-String
+          Write-Host "Process Exit Code: $($p.ExitCode)"
+          $out = Get-Content "out.txt" -Raw -ErrorAction SilentlyContinue
+          $err = Get-Content "err.txt" -Raw -ErrorAction SilentlyContinue
 
-          if ($help -notmatch "kv-stream-stage-mib") {
-            throw "ERROR: --kv-stream-stage-mib is NOT present in the compiled llama-server."
+          if ($p.ExitCode -ne 0 -and -not $out) {
+            Write-Host "--- STDERR OUTPUT ---"
+            Write-Host $err
+            throw "ERROR: llama-server.exe failed to run (Exit code $($p.ExitCode)). Check CUDA DLL paths."
+          }
+
+          if ($out -notmatch "kv-stream-stage-mib" -and $err -notmatch "kv-stream-stage-mib") {
+            Write-Host "--- STDOUT SAMPLE ---"
+            Get-Content "out.txt" -ErrorAction SilentlyContinue | Select-Object -First 25
+            Write-Host "--- STDERR SAMPLE ---"
+            Get-Content "err.txt" -ErrorAction SilentlyContinue | Select-Object -First 25
+            throw "ERROR: --kv-stream-stage-mib flag is NOT present in the compiled binary."
           }
 
           Write-Host "SUCCESS!"
-          Write-Host "Adaptive KV streaming is compiled into llama-server."
-          Write-Host ""
+          Write-Host "Adaptive KV streaming flag '--kv-stream-stage-mib' confirmed in compiled llama-server."
 
-          $help -split "`r?`n" |
-            Where-Object { $_ -match "kv-stream-stage-mib" } |
-            ForEach-Object { Write-Host $_ }
+      - name: Bundle CUDA Runtime DLLs
+        shell: pwsh
+        run: |
+          $targetDir = Get-Item "build\bin\Release", "build\bin" | Where-Object { Test-Path $_ } | Select-Object -First 1
+          $cudaBin = "${{ steps.cuda.outputs.CUDA_PATH }}\bin"
+          
+          # Copy essential CUDA runtime DLLs alongside executable for direct distribution
+          Get-ChildItem -Path $cudaBin -Filter "cudart64_*.dll" | ForEach-Object {
+            Copy-Item $_.FullName -Destination $targetDir.FullName -Force
+          }
+          Get-ChildItem -Path $cudaBin -Filter "cublas64_*.dll" | ForEach-Object {
+            Copy-Item $_.FullName -Destination $targetDir.FullName -Force
+          }
 
-      - name: Upload Windows Binary
+      - name: Upload Windows Binary Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: llama-server-windows-sm120-cu13-adaptive-kv
-          path: build/bin/Release/llama-server.exe
+          name: llama-server-windows-sm120-cu128-adaptive-kv
+          path: |
+            build/bin/Release/llama-server.exe
+            build/bin/Release/*.dll
+            build/bin/llama-server.exe
+            build/bin/*.dll
