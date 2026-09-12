@@ -15,9 +15,7 @@ memory management for the MTP draft context. Everything below is experimental.
 ## Results
 
 Measured on an RTX 5060 Ti 16 GB with Qwen3.8-27B (Q8_0 K cache, Q4_0 V
-cache), `-ngl 99`, `--flash-attn on`, `--parallel 1`, and 96 generated tokens
-at temperature 0. `synthetic` is a repeated sentence; `document` is a real
-source tree/README followed by an instruction.
+cache), `-ngl 99`, `--flash-attn on`, and `--parallel 1`.
 
 ### Upstream vs MTP (head to head)
 
@@ -43,60 +41,22 @@ the total drops. Reproduce with `benchmarks/benchmark_upstream_vs_mtp.py`; the
 sweep writes `results.jsonl`/`results.csv` plus a four-panel PNG/SVG under
 `benchmarks/results/`.
 
-### MTP generation speed
-
-Token generation (TG) throughput with MTP against the same build with
-`--spec-type none` (baseline), at `--kv-stream-arena-mib 2304` and
-`--ctx-size 180000`:
-
-| prompt tokens | prompt   | baseline TG t/s | MTP TG t/s | gain  |
-|--------------:|----------|----------------:|-----------:|------:|
-|         4,000 | synthetic |            27.9 |       74.7 | 2.67x |
-|         8,000 | synthetic |            27.2 |       73.1 | 2.69x |
-|        12,000 | synthetic |            26.6 |       67.4 | 2.53x |
-|        16,000 | synthetic |            26.1 |       60.1 | 2.30x |
-|        20,000 | synthetic |            25.4 |       52.4 | 2.06x |
-|        35,429 | document  |            23.5 |       27.1 | 1.15x |
-|        54,892 | document  |            21.4 |       16.5 | 0.77x |
-|        73,426 | document  |            19.7 |       11.7 | 0.59x |
-
-MTP also costs prompt-processing throughput: about 830 vs 990 t/s at low
-context, and 620 vs 760 t/s at the largest tested context.
-
-### Dynamic MTP eject
-
-With `--kv-stream-mtp-dynamic`, MTP is kept while it helps and ejected once the
-working set outgrows the MTP-active capacity. After the eject, generation
-returns to the baseline rate exactly:
-
-| prompt tokens | prompt   | baseline TG t/s | static MTP TG t/s | dynamic TG t/s |
-|--------------:|----------|----------------:|------------------:|---------------:|
-|         8,000 | synthetic |            27.2 |              73.1 |           74.6 |
-|        35,429 | document  |            23.5 |              27.1 |           23.5 |
-|        73,426 | document  |            19.7 |              11.7 |           19.7 |
-
-The crossover depends on how predictable the text is: roughly 44k prompt tokens
-for real documents and around 80k for highly repetitive text. Dynamic eject is
-most useful above that point, where it keeps the large-context pool without
-paying the MTP generation penalty. These numbers predate the automatic KV pin;
-the pin widens the MTP-active window and keeps MTP active further out (see the
-table below).
-
 ### MTP-active window
 
 The automatic MTP KV pin (the default `--kv-stream-mtp-kv-pages 0`) sizes the
 pinned MTP KV to the decode window in which MTP actually runs, instead of the
-full context. Same arena (`--kv-stream-arena-mib 3328`) and context, old
+full context. Same arena (`--kv-stream-arena-mib 3264`) and context, old
 full-context pin versus the automatic pin:
 
 | `--ctx-size` | MTP-active window, full-context pin | MTP-active window, automatic pin |
 |-------------:|------------------------------------:|---------------------------------:|
-|        32768 |                         full context |                       full context |
-|        65536 |                   full (~63k tokens) |                     full (~63k tokens) |
-|       160000 |                        ~34k tokens |                       ~51k tokens |
+|        32768 |                          full context |                        full context |
+|        65536 |                    full (~60k tokens) |                     full (~61k tokens) |
+|       160000 |                         ~31k tokens  |                        ~49k tokens |
 
-Below `--ctx-size 65536` the whole context already fits the decode pool, so no
-cap is applied and both pins keep MTP active throughout.
+The full-context pin reserves MTP KV for the whole context, which squeezes the
+decode pool and shrinks the window where MTP stays active. Sizing the pin to the
+decode window instead roughly doubles that window at `--ctx-size 160000`.
 
 ## Differences from upstream
 
@@ -198,14 +158,14 @@ decode pool, so the MTP KV never needs the full context. The default sizes the
 pin to that decode window instead. The two are coupled: a smaller pin leaves
 more arena for KV and grows the window, which in turn needs a larger pin. The
 default solves that fixed point directly, so the pin matches the decode
-capacity with no wasted reservation. Measured at `--kv-stream-arena-mib 3328`
+capacity with no wasted reservation. Measured at `--kv-stream-arena-mib 3264`
 with this model and draft:
 
 | `--ctx-size` | prefill resident pages/layer | decode resident pages/layer | MTP-active window   |
 |-------------:|-----------------------------:|----------------------------:|---------------------|
-|        32768 |                          277 |                         286 | full context (~32k) |
-|        65536 |                          236 |                         247 | full context (~63k) |
-|       160000 |                          180 |                         198 | ~50k tokens         |
+|        32768 |                          267 |                         276 | full context (~32k) |
+|        65536 |                          228 |                         239 | full context (~61k) |
+|       160000 |                          172 |                         190 | ~49k tokens         |
 
 A page is 256 tokens, so the window is `decode resident pages/layer * 256`
 tokens, bounded by `--ctx-size`. When the whole context fits the decode pool,
