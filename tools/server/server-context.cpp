@@ -2872,9 +2872,12 @@ private:
         if (++mtp_stable < (uint32_t) std::max(1, params_base.speculative.kv_stream_mtp_stable_decodes)) {
             return;
         }
-        if (mtp_enable()) {
+        if (!mtp_enable()) {
+            // transient; wait another full stable window before retrying
             mtp_stable = 0;
+            return;
         }
+        mtp_stable = 0;
     }
 
     bool mtp_eject() {
@@ -2910,7 +2913,27 @@ private:
     }
 
     bool mtp_enable() {
-        return false;
+        // order matters: re-pin the arena large before creating the MTP context,
+        // its weights and KV allocate from the pinned region
+        llama_set_embeddings_nextn(ctx_tgt, true, false);
+        if (!llama_kv_stream_mtp_set(ctx_tgt, true)) {
+            llama_set_embeddings_nextn(ctx_tgt, false, false);
+            return false;
+        }
+        if (!spec_create()) {
+            llama_kv_stream_mtp_set(ctx_tgt, false);
+            llama_set_embeddings_nextn(ctx_tgt, false, false);
+            return false;
+        }
+        // n_rs_seq changed with the toggle; keep the target removal type in step
+        // without re-running common_context_can_seq_rm (it clears the live KV)
+        if (llama_n_rs_seq(ctx_tgt) > 0) {
+            ctx_tgt_seq_rm_type = COMMON_CONTEXT_SEQ_RM_TYPE_RS;
+        }
+        spec_rewire_slots(true);
+        mtp_ejected = false;
+        SRV_INF("%s", "MTP re-enabled\n");
+        return true;
     }
 
     void update_slots() {
