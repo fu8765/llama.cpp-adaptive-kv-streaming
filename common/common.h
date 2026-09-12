@@ -383,6 +383,11 @@ struct common_params_speculative {
 
     common_params_speculative_ngram_cache ngram_cache;
 
+    bool    kv_stream_mtp_dynamic        = false; // eject MTP under pool pressure, re-enable when it fits
+    int32_t kv_stream_mtp_eject_mib      = 128;   // eject when free pool bytes <= this
+    int32_t kv_stream_mtp_reenable_pages = 16;    // re-enable when resident - active pages >= this
+    int32_t kv_stream_mtp_stable_decodes = 8;     // consecutive controller checks needed
+
     bool has_dft() const {
         return !draft.mparams.empty();
     }

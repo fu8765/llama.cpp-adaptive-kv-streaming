@@ -11,6 +11,7 @@
 #include "common.h"
 #include "fit.h"
 #include "llama.h"
+#include "../src/llama-ext.h"
 #include "log.h"
 #include "sampling.h"
 #include "speculative.h"
@@ -912,6 +913,13 @@ private:
 
     int n_empty_consecutive = 0;
 
+    // dynamic KV-stream MTP control
+    bool     spec_mtp_enabled_dynamic = false;
+    bool     mtp_ejected = false;
+    uint32_t mtp_stable = 0;
+    uint32_t mtp_resident_pages_capture = 0;
+    bool     mtp_capture_valid = false;
+
     std::unique_ptr<server_prompt_cache> prompt_cache;
 
     server_metrics metrics;
@@ -1092,6 +1100,7 @@ private:
                                         params_base.speculative.types.end(),
                                         COMMON_SPECULATIVE_TYPE_DRAFT_MTP) != params_base.speculative.types.end();
         const bool has_spec = has_draft || spec_mtp;
+        spec_mtp_enabled_dynamic = spec_mtp;
 
         if (callback_state) {
             std::vector<std::string> stages = {"text_model"};
@@ -2819,6 +2828,91 @@ private:
     };
 #endif
 
+    static bool streaming_pressure_reached(const llama_kv_stream_status & st, uint64_t eject_bytes) {
+        return st.streaming || st.pool_free_bytes <= eject_bytes;
+    }
+
+    void update_mtp_dynamic() {
+        if (!params_base.speculative.kv_stream_mtp_dynamic) {
+            return;
+        }
+        if (!spec_mtp_enabled_dynamic || ctx_tgt == nullptr) {
+            return;
+        }
+
+        llama_kv_stream_status st = {};
+        if (!llama_kv_stream_get_status(ctx_tgt, &st) || !st.enabled || st.mtp_reserved_bytes == 0) {
+            return;
+        }
+
+        const uint64_t eject_bytes = uint64_t(std::max(0, params_base.speculative.kv_stream_mtp_eject_mib))*1024ull*1024ull;
+
+        if (!mtp_ejected) {
+            if (!streaming_pressure_reached(st, eject_bytes)) {
+                mtp_stable = 0;
+                return;
+            }
+            if (++mtp_stable < (uint32_t) std::max(1, params_base.speculative.kv_stream_mtp_stable_decodes)) {
+                return;
+            }
+            if (mtp_eject()) {
+                mtp_stable = 0;
+            }
+            return;
+        }
+
+        if (!mtp_capture_valid) {
+            return;
+        }
+        const int32_t margin = params_base.speculative.kv_stream_mtp_reenable_pages;
+        if ((int64_t) mtp_resident_pages_capture - (int64_t) st.active_pages < margin) {
+            mtp_stable = 0;
+            return;
+        }
+        if (++mtp_stable < (uint32_t) std::max(1, params_base.speculative.kv_stream_mtp_stable_decodes)) {
+            return;
+        }
+        if (mtp_enable()) {
+            mtp_stable = 0;
+        }
+    }
+
+    bool mtp_eject() {
+        llama_kv_stream_status st = {};
+        if (!llama_kv_stream_get_status(ctx_tgt, &st)) {
+            return false;
+        }
+        mtp_resident_pages_capture = st.resident_pages_per_layer;
+        mtp_capture_valid = true;
+
+        for (auto & slot : slots) {
+            slot.spec_draft.clear();
+            slot.spec_i_batch.clear();
+            slot.spec_ckpt.clear();
+            slot.spec_is_replay = false;
+            slot.spec_prompt.clear();
+        }
+
+        spec_destroy();
+        llama_set_embeddings_nextn(ctx_tgt, false, false);
+        const bool toggled = llama_kv_stream_mtp_set(ctx_tgt, false);
+        spec_rewire_slots(false);
+        if (!toggled) {
+            return false;
+        }
+        mtp_ejected = true;
+
+        llama_kv_stream_status st2 = {};
+        if (llama_kv_stream_get_status(ctx_tgt, &st2)) {
+            SRV_INF("MTP ejected, pool free = %llu bytes\n", (unsigned long long) st2.pool_free_bytes);
+        }
+        return true;
+    }
+
+    bool mtp_enable() {
+        return false;
+    }
+
     void update_slots() {
 #ifdef DEBUG_TIMINGS
         static int64_t t_prev = 0;
@@ -2832,6 +2926,8 @@ private:
             SRV_INF("avg t_sampl       = %f ms\n", (double) t_sampl / n_sampl / 1000.0);
         }
 #endif
+
+        update_mtp_dynamic();
 
         // check if all slots are idle
         {
