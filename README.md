@@ -68,6 +68,22 @@ memory management for the MTP draft context. Everything below is experimental.
 - `--spec-draft-n-max N`: number of draft tokens. It also widens the target recurrent-state cache and the decode compute slab.
 - `--spec-draft-type-k T` / `--spec-draft-type-v T`: draft KV cache types (default F16). The main `--cache-type-k`/`--cache-type-v` do not affect the draft.
 
+### Creating a separate MTP model
+
+The MTP block can be split out of a merged GGUF with
+`gguf-py/gguf/scripts/gguf_extract_mtp.py`:
+
+```sh
+python3 gguf-py/gguf/scripts/gguf_extract_mtp.py \
+    Qwen3.8-27B-ASCII-Condensed-UD-IQ4_XS.gguf \
+    Qwen3.8-27B-ASCII-Condensed-MTP.gguf
+```
+
+The output keeps the target vocab metadata (`token_embd`, `output_norm`) and the
+`blk.<mtp>.` block. It deliberately drops `output.weight` so the draft borrows
+the target LM head; pass `--with-lm-head` to keep it. Use the result with
+`-md <file>`; the target then skips its embedded MTP tensors, saving their VRAM.
+
 ### Dynamic MTP eject (this fork, opt-in)
 - `--kv-stream-mtp-dynamic`: eject MTP when the decode working set exceeds the MTP-active decode capacity, and re-enable it when it fits again (default: disabled).
 - `--kv-stream-mtp-eject-pages N`: eject once the active pages exceed the MTP-active decode capacity by `N` 256-token KV pages (default: 0, i.e. at streaming onset).
@@ -75,6 +91,49 @@ memory management for the MTP draft context. Everything below is experimental.
 - `--kv-stream-mtp-stable-decodes N`: consecutive decode batches required before a transition (default: 4).
 
 The `LLAMA_ARG_KV_STREAM_MTP_*` environment variables mirror these options. Ejecting returns the MTP weights, the MTP KV cache, and the widened recurrent-state cache to the arena pool; re-enabling restores them. The default configuration ejects at streaming onset and re-enables with an 8-page hysteresis band.
+
+**MTP must be the only spec type.** Dynamic eject changes only the MTP context.
+If `--spec-type` mixes `draft-mtp` with another speculator (for example
+`--spec-type draft-mtp,ngram-mod`), the server disables dynamic eject with a
+warning and keeps MTP pinned for the whole run.
+
+### Tuning the dynamic MTP window
+
+MTP is kept while the decode working set fits the MTP-active decode pool, which
+is what remains of the arena after the pinned reservation (MTP weights,
+recurrent-state cache, full-context MTP KV) and the phase compute slab. A larger
+`--ctx-size` reserves more and shrinks the window. Measured at
+`--kv-stream-arena-mib 3072` with this model and draft:
+
+| `--ctx-size` | prefill resident pages/layer | decode resident pages/layer | MTP-active window       |
+|-------------:|-----------------------------:|----------------------------:|-------------------------|
+|        32768 |                          229 |                         246 | full context (~63k cap) |
+|        65536 |                          185 |                         207 | ~53k tokens             |
+|       160000 |                           57 |                          93 | ~24k tokens             |
+
+A page is 256 tokens, so the window is `decode resident pages/layer * 256`
+tokens (the row with the lowest capacity binds).
+
+- `--kv-stream-mtp-eject-pages N` ejects only EARLIER: it fires when the active
+  pages come within `N` pages of the capacity. `N = 0` keeps MTP as long as
+  possible (eject at streaming onset). It cannot extend the window past the pool
+  capacity.
+- `--kv-stream-mtp-reenable-pages N` is the hysteresis: MTP is re-enabled once
+  the active pages fall `N` pages below the capacity. It must exceed
+  `--kv-stream-mtp-eject-pages`; a larger value makes re-enable later and less
+  prone to flapping. Default 8.
+- `--kv-stream-mtp-stable-decodes N` debounces a transition until `N` consecutive
+  decode batches agree. Default 4. Raise it if a mixed workload flaps.
+
+To keep MTP active to a given context length, use the smallest `--ctx-size` that
+covers your workload (each 1000 tokens of ctx reserves about 4 MiB of MTP KV),
+keep `--spec-draft-n-max` small (the recurrent cache is
+`149.6 MiB * (1 + n_max)`), and give the arena as much room as the model leaves.
+At 3072 MiB on a 16 GiB card with a 13.5 GiB model the MTP-active capacity tops
+out near 63k tokens at `--ctx-size 32768` (MTP then stays active for the whole
+32k context), so an 80k-token context cannot keep MTP active at this arena size;
+the three flags tune where the transition happens, they cannot raise that
+ceiling.
 
 ## MTP generation speed
 
