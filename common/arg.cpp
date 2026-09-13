@@ -888,13 +888,6 @@ static bool common_params_parse_ex(int argc, char ** argv, common_params_context
     // parse all CLI args now, so that -hf is available below for remote preset resolution
     parse_cli_args();
 
-    if (params.speculative.kv_stream_spec_dynamic &&
-            params.speculative.kv_stream_spec_reenable_pages <= params.speculative.kv_stream_spec_eject_pages) {
-        throw std::invalid_argument(string_format(
-            "error: --kv-stream-spec-reenable-pages (%d) must be greater than --kv-stream-spec-eject-pages (%d)\n",
-            params.speculative.kv_stream_spec_reenable_pages, params.speculative.kv_stream_spec_eject_pages));
-    }
-
     if (!params.speculative.kv_stream_spec_dynamic && params.speculative.kv_stream_spec_kv_pages != 0) {
         throw std::invalid_argument(string_format(
             "error: --kv-stream-spec-kv-pages (%d) requires --kv-stream-spec-dynamic\n",
@@ -4215,16 +4208,6 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
             params.speculative.kv_stream_spec_keep_pages = value;
         }
     ).set_spec().set_examples({LLAMA_EXAMPLE_SERVER}).set_env("LLAMA_ARG_KV_STREAM_SPEC_KEEP_PAGES"));
-    add_opt(common_arg(
-        {"--kv-stream-spec-eject-pages", "--kv-stream-mtp-eject-pages"}, "N",
-        string_format("eject the draft when the active pages exceed the decode capacity by this many pages (default: %d)", params.speculative.kv_stream_spec_eject_pages),
-        [](common_params & params, int value) {
-            if (value < 0) {
-                throw std::invalid_argument("kv-stream spec eject pages must be non-negative");
-            }
-            params.speculative.kv_stream_spec_eject_pages = value;
-        }
-    ).set_spec().set_examples({LLAMA_EXAMPLE_SERVER}).set_env("LLAMA_ARG_KV_STREAM_SPEC_EJECT_PAGES"));
     add_opt(common_arg(
         {"--kv-stream-spec-reenable-pages", "--kv-stream-mtp-reenable-pages"}, "N",
         string_format("re-enable the draft when the active pages fit below the decode capacity by this many pages (default: %d)", params.speculative.kv_stream_spec_reenable_pages),

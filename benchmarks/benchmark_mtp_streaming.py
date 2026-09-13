@@ -50,7 +50,6 @@ def server_argv(mode: str, args: argparse.Namespace) -> list[str]:
         "-ctkd", args.draft_cache_type_k,
         "-ctvd", args.draft_cache_type_v,
         "--kv-stream-spec-dynamic",
-        "--kv-stream-spec-eject-pages", "0",
         "--kv-stream-spec-reenable-pages", "8",
         "--kv-stream-spec-stable-decodes", "4",
         "-lv", "5",

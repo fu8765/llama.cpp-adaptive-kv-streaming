@@ -2899,14 +2899,13 @@ private:
                     mtp_capacity_pages = std::min(mtp_capacity_pages, usable);
                 }
 
-                const int32_t eject_pages = std::max(0, params_base.speculative.kv_stream_spec_eject_pages);
-                const int32_t keep_pages  = std::max(0, params_base.speculative.kv_stream_spec_keep_pages);
+                const int32_t keep_pages = std::max(0, params_base.speculative.kv_stream_spec_keep_pages);
                 // with a keep threshold, wait until the working set passes it
                 // instead of ejecting as soon as the pool starts streaming
                 const int64_t eject_limit = std::max<int64_t>(
                     (int64_t) mtp_capacity_pages, keep_pages > 0 ? (int64_t) keep_pages : 0);
                 const bool over_limit = eject_limit > 0 &&
-                    (int64_t) st.active_pages + eject_pages > eject_limit;
+                    (int64_t) st.active_pages > eject_limit;
                 const bool trigger = keep_pages > 0 ? over_limit : (st.streaming || over_limit);
                 if (eject_limit == 0 || !trigger) {
                     mtp_stable = 0;

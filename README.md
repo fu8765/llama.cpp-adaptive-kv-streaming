@@ -285,15 +285,14 @@ the target LM head; pass `--with-lm-head` to keep it. Use the result with
 
 ### Dynamic MTP eject (this fork, opt-in)
 - `--kv-stream-spec-dynamic`: eject MTP when the decode working set exceeds the MTP-active decode capacity, and re-enable it when it fits again (default: disabled).
-- `--kv-stream-spec-eject-pages N`: eject once the active pages exceed the MTP-active decode capacity by `N` 256-token KV pages (default: 0, i.e. at streaming onset).
-- `--kv-stream-spec-reenable-pages N`: re-enable once the active pages fit at least `N` pages below that capacity. Must be greater than `--kv-stream-spec-eject-pages` (default: 8).
+- `--kv-stream-spec-keep-pages N`: the single eject threshold: keep MTP active until the target's decode working set exceeds `N` 256-token pages, then eject. `0` (default) ejects at streaming onset; use a large value to keep MTP active throughout. The draft KV slides to follow the target. Requires `--kv-stream-spec-dynamic`.
+- `--kv-stream-spec-reenable-pages N`: re-enable once the active pages fit at least `N` pages below the eject threshold (default: 8).
 - `--kv-stream-spec-stable-decodes N`: consecutive decode batches required before a transition (default: 4).
 - `--kv-stream-spec-kv-pages N`: size of the pinned MTP KV reservation, in 256-token pages. `0` (default) sizes the pin to the MTP-active decode window automatically; a positive `N` pins exactly `N` pages and caps the window there. Requires `--kv-stream-spec-dynamic`.
-- `--kv-stream-spec-keep-pages N`: keep MTP active until the target's decode working set exceeds `N` 256-token pages, then eject like the default. `0` (default) ejects at streaming onset; use a large value to keep MTP active throughout. The draft KV slides to follow the target. Requires `--kv-stream-spec-dynamic`.
 
 Both `--kv-stream-spec-*` and the older `--kv-stream-mtp-*` spellings are accepted; the options were renamed to cover any speculative draft.
 
-The `LLAMA_ARG_KV_STREAM_SPEC_*` environment variables mirror these options. Ejecting returns the draft weights, the draft KV cache, and the widened recurrent-state cache to the arena pool; re-enabling restores them. (The DFlash2 draft has no pinned KV, so ejection returns its weights and the recurrent-state widening.) The default configuration ejects at streaming onset and re-enables with an 8-page hysteresis band.
+The `LLAMA_ARG_KV_STREAM_SPEC_*` environment variables mirror these options. Ejecting returns the draft weights, the draft KV cache, and the widened recurrent-state cache to the arena pool; re-enabling restores them. (The DFlash2 draft has no pinned KV, so ejection returns its weights and the recurrent-state widening.) The default configuration ejects at streaming onset; `--kv-stream-spec-keep-pages` sets the eject threshold and `--kv-stream-spec-reenable-pages` the hysteresis band.
 
 **One pinned draft type only.** Dynamic eject changes only the configured draft (MTP or DFlash2). If `--spec-type` mixes MTP with DFlash2 or a non-pinned speculator (for example `--spec-type draft-mtp,ngram-mod`), the server disables dynamic eject with a warning and keeps the draft pinned for the whole run.
 
@@ -330,13 +329,13 @@ as at `--ctx-size 32768`, no cap is applied and MTP stays active throughout.
   `--kv-stream-spec-dynamic`. Use it to trade MTP reach against pool size, or to
   bound a known working set. `--kv-stream-spec-kv-pages 0` restores the
   automatic sizing.
-- `--kv-stream-spec-eject-pages N` ejects only EARLIER: it fires when the active
-  pages come within `N` pages of the capacity. `N = 0` keeps MTP as long as
-  possible (eject at streaming onset). It cannot extend the window past the pool
+- `--kv-stream-spec-keep-pages N` sets the eject threshold directly: MTP is kept
+  until the active pages exceed `N`. `N = 0` keeps MTP as long as possible
+  (eject at streaming onset). It cannot extend the window past the pool
   capacity.
 - `--kv-stream-spec-reenable-pages N` is the hysteresis: MTP is re-enabled once
-  the active pages fall `N` pages below the capacity. It must exceed
-  `--kv-stream-spec-eject-pages`; a larger value makes re-enable later and less
+  the active pages fall `N` pages below the threshold; a larger value makes
+  re-enable later and less
   prone to flapping. Default 8.
 - `--kv-stream-spec-stable-decodes N` debounces a transition until `N` consecutive
   decode batches agree. Default 4. Raise it if a mixed workload flaps.

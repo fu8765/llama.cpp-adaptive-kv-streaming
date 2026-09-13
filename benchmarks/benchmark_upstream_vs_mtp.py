@@ -144,7 +144,6 @@ def server_argv(config: str, args: argparse.Namespace, context: int) -> list[str
             "--model-draft", str(args.mtp_model),
             "--spec-draft-ngl", "all",
             "--kv-stream-spec-dynamic",
-            "--kv-stream-spec-eject-pages", "0",
             "--kv-stream-spec-reenable-pages", "8",
             "--kv-stream-spec-stable-decodes", "4",
         ]

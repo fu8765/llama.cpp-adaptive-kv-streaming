@@ -11,7 +11,7 @@ MTP gain still beats the extra streaming cost, and eject only when it does not.
 after `stable_decodes` consecutive checks when either
 
 - `st.streaming` is true, or
-- `active_pages + eject_pages > mtp_capacity_pages`.
+- `active_pages > mtp_capacity_pages`.
 
 `st.streaming` is literally `active_pages > resident_pages`
 (src/llama-kv-cache.cpp:1469), so it becomes true exactly when the working set
