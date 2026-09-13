@@ -345,14 +345,6 @@ generation returns to the baseline rate. Keep `--spec-draft-n-max` small (the
 recurrent cache is `149.6 MiB * (1 + n_max)`) and give the arena as much room as
 the model leaves.
 
-## Next steps
-
-Tasks 1, 2, and 3 are implemented on `feature/mtp-next-steps`.
-
-- [Quantize the MTP draft KV cache](docs/next-steps/01-mtp-kv-quantization.md): make the automatic pin track `-ctkd`/`-ctvd` so the freed KV becomes decode window. Implemented; see the MTP KV quantization results above.
-- [Keep MTP active while streaming](docs/next-steps/02-mtp-during-streaming.md): slide the draft KV and set the eject point with `--kv-stream-spec-keep-pages`. Implemented; the 8K sweep above puts the crossover at ~85K tokens (about 330 pages at arena 3136), while the arena-3072 measurement in the doc put it at ~97K (about 380 pages). A copy-pressure policy to find it automatically is still open.
-- [Enable DFlash2](docs/next-steps/03-dflash2-draft.md): build a vocabulary-matching draft for the condensed target and generalize the pin and eject path. Implemented; see the draft threshold results above.
-
 ## Scope and status
 
 - Validated on an RTX 5060 Ti 16 GB with Qwen3.8-27B, a Q8_0 K cache, a Q4_0 V
