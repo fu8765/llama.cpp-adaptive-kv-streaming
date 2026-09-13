@@ -12,6 +12,67 @@ upstream README (linked below) covers that design, its build, and its benchmarks
 This fork keeps that implementation and adds speculative-decoding support and
 memory management for the MTP draft context. Everything below is experimental.
 
+## TLDR
+
+If you have a 16GB CUDA GPU - just do the following:
+
+* Clone this repo, build with these parameters
+
+```sh
+cmake -B build -DGGML_NATIVE=ON -DLLAMA_BUILD_EXAMPLES=OFF -DLLAMA_BUILD_TESTS=OFF -DGGML_CUDA_FA_ALL_QUANTS=ON -DGGML_CUDA=ON
+cmake --build build --config Release -j
+```
+
+* Download this version of Qwen 3.8 27B
+
+[bsaleh03's ASCII condensed UD-IQ4_XS](https://huggingface.co/bsaleh03/Qwen3.8-27B-ASCII-Condensed)
+
+* Run this script to extract MTP to a separate file
+
+```sh
+python3 gguf-py/gguf/scripts/gguf_extract_mtp.py \
+    Qwen3.8-27B-ASCII-Condensed-UD-IQ4_XS.gguf \
+    Qwen3.8-27B-ASCII-Condensed-MTP.gguf
+```
+
+* Use the following parameters (models-preset.ini format) when launching llama-server
+
+```
+m = Qwen3.8-27B-ASCII-Condensed-UD-IQ4_XS.gguf
+md = Qwen3.8-27B-ASCII-Condensed-MTP.gguf
+device-draft = CUDA0
+n-gpu-layers-draft = all
+ctx-size = 160000
+n-gpu-layers = 99
+batch-size = 256
+ubatch-size = 256
+# lower this value if you don't have the full 16GB available for the model
+kv-stream-arena-mib = 3264
+cache-type-k = q8_0
+cache-type-v = q4_0
+spec-type = draft-mtp
+spec-draft-n-max = 3
+kv-stream-mtp-dynamic = on
+kv-stream-mtp-keep-pages = 380
+kv-stream-mtp-reenable-pages = 8
+kv-stream-mtp-stable-decodes = 4
+fit = off
+parallel = 1
+temp = 1.0
+top-p = 0.95
+top-k = 20
+min-p = 0.0
+presence-penalty = 0.0
+repeat-penalty = 1.0
+reasoning = on
+reasoning-preserve = on
+# (slow) CPU only multimodal is better than none
+no-mmproj-offload = on
+mmproj = Qwen3.8-mmproj-BF16.gguf
+load-mode = none
+flash-attn = on
+```
+
 ## Results
 
 Measured on an RTX 5060 Ti 16 GB with Qwen3.8-27B (Q8_0 K cache, Q4_0 V
@@ -49,23 +110,6 @@ recurrent-state cache as a separate `cudaMalloc` on top of the arena. At a given
 arena size the fork's total VRAM is therefore lower, which lets it run a larger
 arena on the same 16 GB card. The cost is internal: the pin takes KV-window
 budget, which the dynamic eject controller manages.
-
-### MTP-active window
-
-The automatic MTP KV pin (the default `--kv-stream-mtp-kv-pages 0`) sizes the
-pinned MTP KV to the decode window in which MTP actually runs, instead of the
-full context. Same arena (`--kv-stream-arena-mib 3264`) and context, old
-full-context pin versus the automatic pin:
-
-| `--ctx-size` | MTP-active window, full-context pin | MTP-active window, automatic pin |
-|-------------:|------------------------------------:|---------------------------------:|
-|        32768 |                          full context |                        full context |
-|        65536 |                    full (~60k tokens) |                     full (~61k tokens) |
-|       160000 |                         ~31k tokens  |                        ~49k tokens |
-
-The full-context pin reserves MTP KV for the whole context, which squeezes the
-decode pool and shrinks the window where MTP stays active. Sizing the pin to the
-decode window instead roughly doubles that window at `--ctx-size 160000`.
 
 ### MTP KV quantization
 
@@ -254,11 +298,6 @@ the model leaves.
 
 ## Next steps
 
-Tasks 1 and 2 are implemented on `feature/mtp-next-steps`; task 3 is still
-planned.
-
-- [Quantize the MTP draft KV cache](docs/next-steps/01-mtp-kv-quantization.md): make the automatic pin track `-ctkd`/`-ctvd` so the freed KV becomes decode window. Implemented; see the MTP KV quantization results above.
-- [Keep MTP active while streaming](docs/next-steps/02-mtp-during-streaming.md): slide the draft KV and set the eject point with `--kv-stream-mtp-keep-pages`. Implemented; the measured crossover is ~97K tokens (about 380 pages at arena 3072). A copy-pressure policy to find it automatically is still open.
 - [Enable DFlash2](docs/next-steps/03-dflash2-draft.md): build a vocabulary-matching draft for the condensed target and generalize the pin and eject path.
 
 ## Scope and status
