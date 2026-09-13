@@ -48,8 +48,8 @@ DEFAULT_INSTRUCTION = (
 MTP_CAP_RE = re.compile(
     r"MTP KV pin = (\d+) pages \((\d+) tokens\), decode window = (\d+) pages"
 )
-MTP_EJECT_RE = re.compile(r"MTP ejected, decode capacity = (\d+) pages/layer")
-MTP_REENABLE_RE = re.compile(r"MTP re-enabled")
+MTP_EJECT_RE = re.compile(r"draft ejected, decode capacity = (\d+) pages/layer")
+MTP_REENABLE_RE = re.compile(r"draft re-enabled")
 
 
 def parse_context_list(value: str) -> list[int]:

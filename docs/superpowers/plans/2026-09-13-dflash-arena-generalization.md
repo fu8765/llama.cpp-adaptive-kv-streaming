@@ -8,6 +8,11 @@ Status: DFlash2 already runs on the condensed target without the arena.
 The vocab adaptation and the CLI rename are done. This plan covers only
 the arena/pin/eject generalization.
 
+Outcome: implemented on `feature/mtp-next-steps`. The draft is pinned by
+its weights plus the widened recurrent-state cache; the draft KV is not
+pinned (see "Outcome" at the end, which also records the measured
+thresholds).
+
 ## Current state
 
 - Adapted draft: `Qwen3.8-27B-ASCII-Condensed-DFlash2-Q2_K_S-MIX.gguf`
@@ -132,3 +137,56 @@ allocation model unchanged.
 - Ejecting DFlash must not disturb the target feature wiring
   (`llama_set_embeddings_layer_inp`); verify a re-enable leaves the
   target usable.
+
+## Outcome
+
+Implemented on `feature/mtp-next-steps`. Deviations from the options above:
+
+- Weights-only pin. All five DFlash2 draft KV layers are sliding-window
+  (window 2048), so the draft KV is about 40 MB and stays in ordinary
+  VRAM. Pinning it would need a buft path through `llama_kv_cache_iswa`,
+  which the plan did not cover. The pinned region holds the draft weights
+  (535 MB) and the widened recurrent-state cache instead.
+- No `draft_kv_bytes_per_token` / `draft_kv_layers` fields. Option A was
+  not needed for the weights-only pin. The existing `mtp_weights_bytes`
+  was renamed to `draft_weights_bytes`, and a new `spec_draft` flag gates
+  the pin for any draft type; `spec_mtp` stays the MTP-only selector.
+- The `n_ubatch` cap in `common/speculative.cpp` was still gated on
+  `spec_mtp`. Generalizing it to `spec_draft` was required: without it the
+  DFlash2 draft context allocated a full prefill compute buffer and the
+  usable arena was about 300 MiB smaller.
+
+Files changed: include/llama.h, src/llama-cparams.h, src/llama-context.h,
+src/llama-context.cpp, common/common.cpp, common/speculative.cpp,
+tools/server/server-context.cpp.
+
+The eject/enable dispatch clears the DFlash target feature taps
+(`llama_set_embeddings_layer_inp`, via `llama_model_target_layer_ids`)
+before `spec_destroy`; the draft constructor re-arms them on re-enable.
+
+### Measured thresholds
+
+Sweep from 8K through 160K in 8K steps, each draft at its largest
+validated arena (MTP 3136 MiB, DFlash2 3200 MiB, no-spec 3072 MiB),
+`--ctx-size 160000`, q8_0 K / q4_0 V, 256-token decode. Full tables and the
+figures are in the fork README; `benchmarks/results/draft-thresholds.csv` holds
+the raw numbers.
+
+![MTP and DFlash2 decode throughput vs context](../../../media/draft-thresholds-decode.png)
+
+![MTP and DFlash2 prefill throughput vs context](../../../media/draft-thresholds-prefill.png)
+
+Findings:
+
+- No ejection while the working set fits: eject == keep up to the
+  streaming onset (MTP about 49K, DFlash2 about 57K).
+- The default ejects at onset, too early. Keeping is 1.8 to 2.1x faster
+  there (MTP 49K: 47.2 vs 22.2 t/s; DFlash2 57K: 39.1 vs 21.5 t/s).
+- Keep wins to about 81K and loses from about 90K. Crossover about 85K, or
+  about 330 pages/layer, for both drafts.
+- After ejection, decode tracks the no-spec baseline (98K: 18.2 vs 18.1).
+- Robust eject threshold about 300 pages/layer.
+
+Not done: moving the default eject threshold to about 300 pages/layer. The
+MTP keep point at 122880 is missing because of a pre-existing
+streaming-kernel launch timeout that reproduces on an untouched build.

@@ -1764,14 +1764,22 @@ struct llama_context_params common_context_params_to_llama(const common_params &
     cparams.spec_mtp = std::find(
         params.speculative.types.begin(), params.speculative.types.end(),
         COMMON_SPECULATIVE_TYPE_DRAFT_MTP) != params.speculative.types.end();
+    // a pinned draft shares the arena with the target: MTP, DFlash or DSpark
+    const bool spec_dflash = std::find(
+        params.speculative.types.begin(), params.speculative.types.end(),
+        COMMON_SPECULATIVE_TYPE_DRAFT_DFLASH) != params.speculative.types.end();
+    const bool spec_dspark = std::find(
+        params.speculative.types.begin(), params.speculative.types.end(),
+        COMMON_SPECULATIVE_TYPE_DRAFT_DSPARK) != params.speculative.types.end();
+    cparams.spec_draft = cparams.spec_mtp || spec_dflash || spec_dspark;
     cparams.mtp_kv_type_k = params.speculative.draft.cache_type_k;
     cparams.mtp_kv_type_v = params.speculative.draft.cache_type_v;
-    cparams.mtp_weights_bytes = 0;
-    if (cparams.spec_mtp && params.speculative.has_dft()) {
+    cparams.draft_weights_bytes = 0;
+    if (cparams.spec_draft && params.speculative.has_dft()) {
         std::error_code ec;
         const auto size = std::filesystem::file_size(params.speculative.draft.mparams.path, ec);
         if (!ec) {
-            cparams.mtp_weights_bytes = size;
+            cparams.draft_weights_bytes = size;
         }
     }
     cparams.kv_stream_mtp_kv_pages = (uint32_t) std::max(0, params.speculative.kv_stream_spec_kv_pages);

@@ -364,7 +364,7 @@ extern "C" {
         uint32_t layer_count;                // streaming attention layers
         uint32_t page_bytes;                 // bytes per KV page
         uint64_t pool_free_bytes;            // controlled pool bytes minus the active working set
-        uint64_t mtp_reserved_bytes;         // pinned(true) - pinned(false); 0 when MTP is not configured
+        uint64_t draft_reserved_bytes;       // pinned(true) - pinned(false); 0 when no draft is configured
         uint32_t mtp_kv_pages;               // MTP KV pages pin; 0 when MTP is not configured
     };
 
@@ -405,7 +405,8 @@ extern "C" {
         uint32_t kv_stream_arena_mib; // shared CUDA KV + compute arena, 0 = disabled [EXPERIMENTAL]
         uint32_t n_max_spec_draft;    // max speculative draft tokens, 0 = none [EXPERIMENTAL]
         bool     spec_mtp;            // MTP speculative decoding is enabled, shares the KV arena with the target [EXPERIMENTAL]
-        size_t   mtp_weights_bytes;   // arena space reserved for the MTP draft weights, 0 = none [EXPERIMENTAL]
+        bool     spec_draft;          // a speculative draft (MTP, DFlash or DSpark) is pinned in the KV arena [EXPERIMENTAL]
+        size_t   draft_weights_bytes; // arena space reserved for the pinned draft weights, 0 = none [EXPERIMENTAL]
         uint32_t kv_stream_mtp_kv_pages; // pinned MTP KV pages, 0 = pin the MTP-active decode window [EXPERIMENTAL]
         bool     kv_stream_mtp_dynamic;  // dynamic MTP eject and re-enable is enabled [EXPERIMENTAL]
         enum ggml_type mtp_kv_type_k; // MTP draft KV cache data type for K, used to size the pin [EXPERIMENTAL]
@@ -628,10 +629,10 @@ extern "C" {
 
     // Reconfigure the phase arena between the MTP-reserved and MTP-free layouts.
     // Must be called between ubatches, not concurrently with llama_decode.
-    // Setting false requires the MTP context and draft model to have been destroyed first.
-    // Setting true only reserves the region; the caller must create the MTP context
+    // Setting false requires the draft context and draft model to have been destroyed first.
+    // Setting true only reserves the region; the caller must create the draft context
     // afterwards so its weights and KV cache allocate from the pinned buft.
-    LLAMA_API bool llama_kv_stream_mtp_set(struct llama_context * ctx, bool mtp_active);
+    LLAMA_API bool llama_kv_stream_draft_set(struct llama_context * ctx, bool draft_active);
 
     // Get the model's RoPE frequency scaling factor
     LLAMA_API float llama_model_rope_freq_scale_train(const struct llama_model * model);

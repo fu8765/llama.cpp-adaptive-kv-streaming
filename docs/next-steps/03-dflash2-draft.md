@@ -81,3 +81,18 @@ layer, so expect a smaller TG gain on a 16 GB card.
 
 - `--spec-type draft-dflash` runs on the condensed target with the pinned arena
   and dynamic eject, with measured TG/PP versus MTP.
+
+## Outcome
+
+Implemented on `feature/mtp-next-steps`. The draft is pinned by its weights
+(535 MB) plus the widened recurrent-state cache; the five draft KV layers are
+all sliding-window (window 2048), so the draft KV is only about 40 MB and stays
+in ordinary VRAM. A `spec_draft` flag now gates the arena pin for MTP, DFlash
+and DSpark, and the dynamic eject/enable path dispatches on the active draft
+type (including clearing the DFlash target feature taps before `spec_destroy`).
+
+The 8K-through-160K default-vs-keep sweep (MTP 3136 MiB, DFlash2 3200 MiB) puts
+the keep/eject decode crossover at about 85K tokens (about 330 pages/layer) for
+both drafts. The default controller ejects at streaming onset, which is 1.8 to
+2.1x too early. Tables, the decode and prefill figures, and the findings are in
+the fork README; raw data in `benchmarks/results/draft-thresholds.csv`.
