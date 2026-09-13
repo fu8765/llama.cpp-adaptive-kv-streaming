@@ -52,7 +52,7 @@ budget, which the dynamic eject controller manages.
 
 ### MTP-active window
 
-The automatic MTP KV pin (the default `--kv-stream-mtp-kv-pages 0`) sizes the
+The automatic MTP KV pin (the default `--kv-stream-spec-kv-pages 0`) sizes the
 pinned MTP KV to the decode window in which MTP actually runs, instead of the
 full context. Same arena (`--kv-stream-arena-mib 3264`) and context, old
 full-context pin versus the automatic pin:
@@ -92,13 +92,13 @@ table are in
 By default the dynamic controller ejects MTP at streaming onset. Keeping it
 active lets it speculate on the recent window while the target streams, and the
 draft KV now slides (evicting the oldest cells) so it can follow the target past
-the pinned window. `--kv-stream-mtp-keep-pages N` sets how long to keep it: MTP
+the pinned window. `--kv-stream-spec-keep-pages N` sets how long to keep it: MTP
 stays active until the target's decode working set exceeds `N` 256-token pages,
 then ejects as usual. `0` (default) ejects at streaming onset; a very large `N`
 keeps it active throughout. The measurements below are the keep-throughout arm;
 at arena 3072 the crossover is about 380 pages (about 97K tokens), so
-`--kv-stream-mtp-keep-pages 380` reproduces it. Requires
-`--kv-stream-mtp-dynamic`.
+`--kv-stream-spec-keep-pages 380` reproduces it. Requires
+`--kv-stream-spec-dynamic`.
 
 | prompt | keep tg t/s | default tg t/s | keep/default | keep pp t/s | default pp t/s |
 |---:|---:|---:|---:|---:|---:|
@@ -189,14 +189,16 @@ the target LM head; pass `--with-lm-head` to keep it. Use the result with
 `-md <file>`; the target then skips its embedded MTP tensors, saving their VRAM.
 
 ### Dynamic MTP eject (this fork, opt-in)
-- `--kv-stream-mtp-dynamic`: eject MTP when the decode working set exceeds the MTP-active decode capacity, and re-enable it when it fits again (default: disabled).
-- `--kv-stream-mtp-eject-pages N`: eject once the active pages exceed the MTP-active decode capacity by `N` 256-token KV pages (default: 0, i.e. at streaming onset).
-- `--kv-stream-mtp-reenable-pages N`: re-enable once the active pages fit at least `N` pages below that capacity. Must be greater than `--kv-stream-mtp-eject-pages` (default: 8).
-- `--kv-stream-mtp-stable-decodes N`: consecutive decode batches required before a transition (default: 4).
-- `--kv-stream-mtp-kv-pages N`: size of the pinned MTP KV reservation, in 256-token pages. `0` (default) sizes the pin to the MTP-active decode window automatically; a positive `N` pins exactly `N` pages and caps the window there. Requires `--kv-stream-mtp-dynamic`.
-- `--kv-stream-mtp-keep-pages N`: keep MTP active until the target's decode working set exceeds `N` 256-token pages, then eject like the default. `0` (default) ejects at streaming onset; use a large value to keep MTP active throughout. The draft KV slides to follow the target. Requires `--kv-stream-mtp-dynamic`.
+- `--kv-stream-spec-dynamic`: eject MTP when the decode working set exceeds the MTP-active decode capacity, and re-enable it when it fits again (default: disabled).
+- `--kv-stream-spec-eject-pages N`: eject once the active pages exceed the MTP-active decode capacity by `N` 256-token KV pages (default: 0, i.e. at streaming onset).
+- `--kv-stream-spec-reenable-pages N`: re-enable once the active pages fit at least `N` pages below that capacity. Must be greater than `--kv-stream-spec-eject-pages` (default: 8).
+- `--kv-stream-spec-stable-decodes N`: consecutive decode batches required before a transition (default: 4).
+- `--kv-stream-spec-kv-pages N`: size of the pinned MTP KV reservation, in 256-token pages. `0` (default) sizes the pin to the MTP-active decode window automatically; a positive `N` pins exactly `N` pages and caps the window there. Requires `--kv-stream-spec-dynamic`.
+- `--kv-stream-spec-keep-pages N`: keep MTP active until the target's decode working set exceeds `N` 256-token pages, then eject like the default. `0` (default) ejects at streaming onset; use a large value to keep MTP active throughout. The draft KV slides to follow the target. Requires `--kv-stream-spec-dynamic`.
 
-The `LLAMA_ARG_KV_STREAM_MTP_*` environment variables mirror these options. Ejecting returns the MTP weights, the MTP KV cache, and the widened recurrent-state cache to the arena pool; re-enabling restores them. The default configuration ejects at streaming onset and re-enables with an 8-page hysteresis band.
+Both `--kv-stream-spec-*` and the older `--kv-stream-mtp-*` spellings are accepted; the options were renamed to cover any speculative draft.
+
+The `LLAMA_ARG_KV_STREAM_SPEC_*` environment variables mirror these options. Ejecting returns the MTP weights, the MTP KV cache, and the widened recurrent-state cache to the arena pool; re-enabling restores them. The default configuration ejects at streaming onset and re-enables with an 8-page hysteresis band.
 
 **MTP must be the only spec type.** Dynamic eject changes only the MTP context.
 If `--spec-type` mixes `draft-mtp` with another speculator (for example
@@ -229,22 +231,22 @@ A page is 256 tokens, so the window is `decode resident pages/layer * 256`
 tokens, bounded by `--ctx-size`. When the whole context fits the decode pool,
 as at `--ctx-size 32768`, no cap is applied and MTP stays active throughout.
 
-- `--kv-stream-mtp-kv-pages N` overrides the automatic pin and reserves exactly
+- `--kv-stream-spec-kv-pages N` overrides the automatic pin and reserves exactly
   `N` pages of MTP KV. The window is then capped at `N` pages minus a small
   catch-up margin (the MTP context decodes every target batch, so it must absorb
   a few batches past the nominal window before the eject lands). Requires
-  `--kv-stream-mtp-dynamic`. Use it to trade MTP reach against pool size, or to
-  bound a known working set. `--kv-stream-mtp-kv-pages 0` restores the
+  `--kv-stream-spec-dynamic`. Use it to trade MTP reach against pool size, or to
+  bound a known working set. `--kv-stream-spec-kv-pages 0` restores the
   automatic sizing.
-- `--kv-stream-mtp-eject-pages N` ejects only EARLIER: it fires when the active
+- `--kv-stream-spec-eject-pages N` ejects only EARLIER: it fires when the active
   pages come within `N` pages of the capacity. `N = 0` keeps MTP as long as
   possible (eject at streaming onset). It cannot extend the window past the pool
   capacity.
-- `--kv-stream-mtp-reenable-pages N` is the hysteresis: MTP is re-enabled once
+- `--kv-stream-spec-reenable-pages N` is the hysteresis: MTP is re-enabled once
   the active pages fall `N` pages below the capacity. It must exceed
-  `--kv-stream-mtp-eject-pages`; a larger value makes re-enable later and less
+  `--kv-stream-spec-eject-pages`; a larger value makes re-enable later and less
   prone to flapping. Default 8.
-- `--kv-stream-mtp-stable-decodes N` debounces a transition until `N` consecutive
+- `--kv-stream-spec-stable-decodes N` debounces a transition until `N` consecutive
   decode batches agree. Default 4. Raise it if a mixed workload flaps.
 
 Set `--ctx-size` to the longest prompt you need; beyond that MTP ejects and
@@ -258,7 +260,7 @@ Tasks 1 and 2 are implemented on `feature/mtp-next-steps`; task 3 is still
 planned.
 
 - [Quantize the MTP draft KV cache](docs/next-steps/01-mtp-kv-quantization.md): make the automatic pin track `-ctkd`/`-ctvd` so the freed KV becomes decode window. Implemented; see the MTP KV quantization results above.
-- [Keep MTP active while streaming](docs/next-steps/02-mtp-during-streaming.md): slide the draft KV and set the eject point with `--kv-stream-mtp-keep-pages`. Implemented; the measured crossover is ~97K tokens (about 380 pages at arena 3072). A copy-pressure policy to find it automatically is still open.
+- [Keep MTP active while streaming](docs/next-steps/02-mtp-during-streaming.md): slide the draft KV and set the eject point with `--kv-stream-spec-keep-pages`. Implemented; the measured crossover is ~97K tokens (about 380 pages at arena 3072). A copy-pressure policy to find it automatically is still open.
 - [Enable DFlash2](docs/next-steps/03-dflash2-draft.md): build a vocabulary-matching draft for the condensed target and generalize the pin and eject path.
 
 ## Scope and status

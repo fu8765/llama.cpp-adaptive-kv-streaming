@@ -48,14 +48,14 @@ def server_argv(mode: str, args: argparse.Namespace) -> list[str]:
         "--spec-draft-ngl", "all",
         "-ctkd", args.draft_cache_type_k,
         "-ctvd", args.draft_cache_type_v,
-        "--kv-stream-mtp-dynamic",
-        "--kv-stream-mtp-eject-pages", "0",
-        "--kv-stream-mtp-reenable-pages", "8",
-        "--kv-stream-mtp-stable-decodes", "4",
+        "--kv-stream-spec-dynamic",
+        "--kv-stream-spec-eject-pages", "0",
+        "--kv-stream-spec-reenable-pages", "8",
+        "--kv-stream-spec-stable-decodes", "4",
         "-lv", "5",
     ]
     if mode == "keep":
-        argv += ["--kv-stream-mtp-keep-pages", str(args.keep_pages)]
+        argv += ["--kv-stream-spec-keep-pages", str(args.keep_pages)]
     return argv
 
 

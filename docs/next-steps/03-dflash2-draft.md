@@ -5,6 +5,8 @@
 Run DFlash2 speculative decoding on the condensed-vocabulary target, using the
 same phase arena, pinned draft weights, and dynamic eject that MTP uses.
 
+The arena pin/eject generalization is planned in [docs/superpowers/plans/2026-09-13-dflash-arena-generalization.md](../superpowers/plans/2026-09-13-dflash-arena-generalization.md).
+
 ## Context
 
 DFlash and DFlash2 live in src/models/dflash.cpp. DFlash2 adds conv/selector

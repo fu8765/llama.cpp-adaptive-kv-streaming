@@ -1106,7 +1106,7 @@ private:
             [](common_speculative_type t) {
                 return t != COMMON_SPECULATIVE_TYPE_NONE && t != COMMON_SPECULATIVE_TYPE_DRAFT_MTP;
             });
-        if (params_base.speculative.kv_stream_mtp_dynamic && spec_mtp && has_other_spec) {
+        if (params_base.speculative.kv_stream_spec_dynamic && spec_mtp && has_other_spec) {
             SRV_WRN("%s", "dynamic MTP ejection requires MTP to be the only speculative type, disabling\n");
             spec_mtp_enabled_dynamic = false;
         }
@@ -1380,7 +1380,7 @@ private:
 
         spec_rewire_slots(true);
 
-        if (spec_mtp_enabled_dynamic && params_base.speculative.kv_stream_mtp_dynamic) {
+        if (spec_mtp_enabled_dynamic && params_base.speculative.kv_stream_spec_dynamic) {
             llama_kv_stream_status st = {};
             if (llama_kv_stream_get_status(ctx_tgt, &st) && st.enabled) {
                 // seed the capacity before any decode, so a prompt that streams
@@ -2851,7 +2851,7 @@ private:
 #endif
 
     void update_mtp_dynamic() {
-        if (!params_base.speculative.kv_stream_mtp_dynamic) {
+        if (!params_base.speculative.kv_stream_spec_dynamic) {
             return;
         }
         if (!spec_mtp_enabled_dynamic || ctx_tgt == nullptr) {
@@ -2863,7 +2863,7 @@ private:
                 return;
             }
 
-            const uint32_t stable_decodes = (uint32_t) std::max(1, params_base.speculative.kv_stream_mtp_stable_decodes);
+            const uint32_t stable_decodes = (uint32_t) std::max(1, params_base.speculative.kv_stream_spec_stable_decodes);
 
             if (!mtp_ejected) {
                 // the phase plan reports the MTP-active decode capacity; only
@@ -2882,8 +2882,8 @@ private:
                     mtp_capacity_pages = std::min(mtp_capacity_pages, usable);
                 }
 
-                const int32_t eject_pages = std::max(0, params_base.speculative.kv_stream_mtp_eject_pages);
-                const int32_t keep_pages  = std::max(0, params_base.speculative.kv_stream_mtp_keep_pages);
+                const int32_t eject_pages = std::max(0, params_base.speculative.kv_stream_spec_eject_pages);
+                const int32_t keep_pages  = std::max(0, params_base.speculative.kv_stream_spec_keep_pages);
                 // with a keep threshold, wait until the working set passes it
                 // instead of ejecting as soon as the pool starts streaming
                 const int64_t eject_limit = std::max<int64_t>(
@@ -2911,8 +2911,8 @@ private:
                 return;
             }
 
-            const int32_t reenable_pages = std::max(0, params_base.speculative.kv_stream_mtp_reenable_pages);
-            const int32_t keep_pages     = std::max(0, params_base.speculative.kv_stream_mtp_keep_pages);
+            const int32_t reenable_pages = std::max(0, params_base.speculative.kv_stream_spec_reenable_pages);
+            const int32_t keep_pages     = std::max(0, params_base.speculative.kv_stream_spec_keep_pages);
             const int64_t reenable_limit = std::max<int64_t>(
                 (int64_t) mtp_capacity_pages, keep_pages > 0 ? (int64_t) keep_pages : 0);
             // without a threshold, streaming blocks re-enable; with one, only

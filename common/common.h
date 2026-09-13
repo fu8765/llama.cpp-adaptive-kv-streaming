@@ -383,12 +383,12 @@ struct common_params_speculative {
 
     common_params_speculative_ngram_cache ngram_cache;
 
-    bool    kv_stream_mtp_dynamic        = false; // eject MTP when the decode working set exceeds capacity, re-enable when it fits
-    int32_t kv_stream_mtp_eject_pages    = 0;     // eject when active pages exceed the MTP-active decode capacity by this
-    int32_t kv_stream_mtp_reenable_pages = 8;     // re-enable when active pages fit below that capacity by this
-    int32_t kv_stream_mtp_stable_decodes = 4;     // consecutive decode batches needed for a transition
-    int32_t kv_stream_mtp_kv_pages       = 0;     // pinned MTP KV pages, 0 = pin the MTP-active decode window
-    int32_t kv_stream_mtp_keep_pages     = 0;     // keep MTP active until the decode working set exceeds this; 0 = eject at streaming onset
+    bool    kv_stream_spec_dynamic        = false; // eject the draft when the decode working set exceeds capacity, re-enable when it fits
+    int32_t kv_stream_spec_eject_pages    = 0;     // eject when active pages exceed the decode capacity by this
+    int32_t kv_stream_spec_reenable_pages = 8;     // re-enable when active pages fit below that capacity by this
+    int32_t kv_stream_spec_stable_decodes = 4;     // consecutive decode batches needed for a transition
+    int32_t kv_stream_spec_kv_pages       = 0;     // pinned draft KV pages, 0 = pin the decode window
+    int32_t kv_stream_spec_keep_pages     = 0;     // keep the draft active until the decode working set exceeds this; 0 = eject at streaming onset
 
     bool has_dft() const {
         return !draft.mparams.empty();

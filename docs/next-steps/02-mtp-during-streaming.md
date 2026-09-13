@@ -33,7 +33,7 @@ context, and it depends on how much the streaming actually costs.
 ## Finding: the draft window was a hard wall
 
 Keeping MTP active past the pin window (the keep-throughout arm of
-`benchmarks/benchmark_mtp_streaming.py`, or `--kv-stream-mtp-keep-pages` set
+`benchmarks/benchmark_mtp_streaming.py`, or `--kv-stream-spec-keep-pages` set
 above the window) fails without a sliding draft KV.
 `benchmarks/benchmark_mtp_streaming.py` (arena 3072, q8_0 K / q4_0 V) ejects
 MTP in default mode at 50000 and above. Keeping it active fails at context
@@ -87,7 +87,7 @@ Keeping MTP costs prefill throughout: -3.5% at 50K rising to about -17% at
 than its neighbours (acceptance 53% vs 73% at 120K); the 90K-to-100K crossover
 is not sensitive to it.
 
-`--kv-stream-mtp-keep-pages N` turns this into a knob: MTP stays active until
+`--kv-stream-spec-keep-pages N` turns this into a knob: MTP stays active until
 the target's decode working set exceeds `N` 256-token pages, then ejects like the
 default. `0` (default) ejects at streaming onset; setting `N` near the crossover
 (about 380 pages at arena 3072) captures most of the gain while ejecting past it.
