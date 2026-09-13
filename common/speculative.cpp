@@ -2557,9 +2557,9 @@ common_speculative_init_result::common_speculative_init_result(
         }
     }
 
-    if (spec_mtp) {
+    if (cparams.spec_draft) {
         // keep n_batch for the prefill catch-up decode, but cap n_ubatch so
-        // the compute graph stays small (the draft head runs few tokens)
+        // the compute graph stays small (the draft runs few tokens)
         const uint32_t n_ubatch_dft = std::max(8u, (uint32_t) params.speculative.draft.n_max + 2u) * cparams.n_seq_max;
         cparams.n_ubatch = std::min(cparams.n_ubatch, n_ubatch_dft);
     }
@@ -2575,9 +2575,9 @@ common_speculative_init_result::common_speculative_init_result(
         LOG_INF("%s: loading draft model '%s'\n", __func__, model_path.c_str());
 
         // when the target owns a KV-stream arena, back the draft weights with its
-        // pinned region so that ejecting MTP returns the weights to the pool
+        // pinned region so that ejecting the draft returns the weights to the pool
         llama_model_tensor_buft_override dft_overrides[2] = { { ".*", nullptr }, { nullptr, nullptr } };
-        if (spec_mtp) {
+        if (cparams.spec_draft) {
             auto * buft = llama_kv_stream_pinned_buft(ctx_tgt);
             if (buft != nullptr) {
                 dft_overrides[0].buft = buft;

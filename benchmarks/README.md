@@ -96,3 +96,35 @@ driver spellings remain accepted as compatibility aliases.
 
 Do not run another GPU workload during the sweep. Its allocations would change
 the automatically selected arena and invalidate comparisons between points.
+
+## Speculative draft threshold sweeps
+
+`benchmark_mtp_streaming.py` compares the dynamic eject controller ("default")
+against keeping the draft for the whole run ("keep") for any pinned draft. It
+runs the same prompt-and-decode workload across a list of context capacities and
+writes a resumable `results.jsonl`, a CSV, and a plot. Select the draft with
+`--spec-type` and `--draft-model` (`--mtp-model` still works):
+
+```bash
+python3 benchmarks/benchmark_mtp_streaming.py \
+  --model /path/to/target.gguf \
+  --draft-model /path/to/draft.gguf \
+  --spec-type draft-dflash \
+  --arena-mib 3200 \
+  --tag dflash \
+  --contexts 8192,16384,24576,32768,40960,49152,57344,65536,73728,81920,90112,98304,106496,114688,122880,131072,139264,147456,155648,160000 \
+  --output-dir benchmarks/results/draft-thresh-dflash
+```
+
+`--arena-mib` must be the largest arena that validates for that draft on the
+GPU; probe it first. `benchmark_upstream_vs_mtp.py --configs upstream` measures
+the no-spec baseline. `plot_draft_thresholds.py` combines the three legs into
+`benchmarks/results/draft-thresholds.csv` and two separate figures (decode and
+prefill), and copies them to `media/draft-thresholds-decode.png` and
+`media/draft-thresholds-prefill.png` for the README:
+
+```bash
+python3 benchmarks/plot_draft_thresholds.py
+```
+
+The measured thresholds and the recommended eject point are in the fork README.

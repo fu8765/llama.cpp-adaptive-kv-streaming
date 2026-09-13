@@ -48,8 +48,8 @@ DEFAULT_INSTRUCTION = (
 MTP_CAP_RE = re.compile(
     r"MTP KV pin = (\d+) pages \((\d+) tokens\), decode window = (\d+) pages"
 )
-MTP_EJECT_RE = re.compile(r"MTP ejected, decode capacity = (\d+) pages/layer")
-MTP_REENABLE_RE = re.compile(r"MTP re-enabled")
+MTP_EJECT_RE = re.compile(r"draft ejected, decode capacity = (\d+) pages/layer")
+MTP_REENABLE_RE = re.compile(r"draft re-enabled")
 
 
 def parse_context_list(value: str) -> list[int]:
@@ -143,10 +143,9 @@ def server_argv(config: str, args: argparse.Namespace, context: int) -> list[str
             "--spec-draft-n-max", str(args.spec_draft_n_max),
             "--model-draft", str(args.mtp_model),
             "--spec-draft-ngl", "all",
-            "--kv-stream-mtp-dynamic",
-            "--kv-stream-mtp-eject-pages", "0",
-            "--kv-stream-mtp-reenable-pages", "8",
-            "--kv-stream-mtp-stable-decodes", "4",
+            "--kv-stream-spec-dynamic",
+            "--kv-stream-spec-reenable-pages", "8",
+            "--kv-stream-spec-stable-decodes", "4",
         ]
     return argv
 

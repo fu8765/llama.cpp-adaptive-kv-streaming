@@ -913,8 +913,9 @@ private:
 
     int n_empty_consecutive = 0;
 
-    // dynamic KV-stream MTP control
-    bool     spec_mtp_enabled_dynamic = false;
+    // dynamic KV-stream draft control
+    bool     spec_draft_enabled_dynamic = false;
+    bool     spec_draft_is_mtp = false; // active pinned draft is MTP (vs DFlash/DSpark)
     bool     mtp_ejected = false;
     bool     mtp_last_batch_generation = false; // previous decoded batch was a generation batch
     uint32_t mtp_stable = 0;
@@ -1099,16 +1100,32 @@ private:
         const bool spec_mtp = std::find(params_base.speculative.types.begin(),
                                         params_base.speculative.types.end(),
                                         COMMON_SPECULATIVE_TYPE_DRAFT_MTP) != params_base.speculative.types.end();
+        const bool spec_dflash = std::find(params_base.speculative.types.begin(),
+                                        params_base.speculative.types.end(),
+                                        COMMON_SPECULATIVE_TYPE_DRAFT_DFLASH) != params_base.speculative.types.end();
+        const bool spec_dspark = std::find(params_base.speculative.types.begin(),
+                                        params_base.speculative.types.end(),
+                                        COMMON_SPECULATIVE_TYPE_DRAFT_DSPARK) != params_base.speculative.types.end();
         const bool has_spec = has_draft || spec_mtp;
-        spec_mtp_enabled_dynamic = spec_mtp;
+        // the pinned draft is MTP or a DFlash-family draft; the server drives
+        // their eject/re-enable feature wiring differently
+        const bool pin_draft = spec_mtp || spec_dflash || spec_dspark;
+        spec_draft_enabled_dynamic = pin_draft;
+        spec_draft_is_mtp = spec_mtp;
         const bool has_other_spec = std::any_of(params_base.speculative.types.begin(),
             params_base.speculative.types.end(),
             [](common_speculative_type t) {
-                return t != COMMON_SPECULATIVE_TYPE_NONE && t != COMMON_SPECULATIVE_TYPE_DRAFT_MTP;
+                return t != COMMON_SPECULATIVE_TYPE_NONE &&
+                       t != COMMON_SPECULATIVE_TYPE_DRAFT_MTP &&
+                       t != COMMON_SPECULATIVE_TYPE_DRAFT_DFLASH &&
+                       t != COMMON_SPECULATIVE_TYPE_DRAFT_DSPARK;
             });
-        if (params_base.speculative.kv_stream_mtp_dynamic && spec_mtp && has_other_spec) {
-            SRV_WRN("%s", "dynamic MTP ejection requires MTP to be the only speculative type, disabling\n");
-            spec_mtp_enabled_dynamic = false;
+        // only one pinned draft family at a time; mixing MTP with DFlash would
+        // reserve the wrong weights
+        if (params_base.speculative.kv_stream_spec_dynamic && pin_draft &&
+                (has_other_spec || (spec_mtp && (spec_dflash || spec_dspark)))) {
+            SRV_WRN("%s", "dynamic draft ejection requires a single pinned draft type, disabling\n");
+            spec_draft_enabled_dynamic = false;
         }
 
         mtp_ejected = false;
@@ -1380,7 +1397,7 @@ private:
 
         spec_rewire_slots(true);
 
-        if (spec_mtp_enabled_dynamic && params_base.speculative.kv_stream_mtp_dynamic) {
+        if (spec_draft_enabled_dynamic && params_base.speculative.kv_stream_spec_dynamic) {
             llama_kv_stream_status st = {};
             if (llama_kv_stream_get_status(ctx_tgt, &st) && st.enabled) {
                 // seed the capacity before any decode, so a prompt that streams
@@ -2850,11 +2867,11 @@ private:
     };
 #endif
 
-    void update_mtp_dynamic() {
-        if (!params_base.speculative.kv_stream_mtp_dynamic) {
+    void update_draft_dynamic() {
+        if (!params_base.speculative.kv_stream_spec_dynamic) {
             return;
         }
-        if (!spec_mtp_enabled_dynamic || ctx_tgt == nullptr) {
+        if (!spec_draft_enabled_dynamic || ctx_tgt == nullptr) {
             return;
         }
         try {
@@ -2863,7 +2880,7 @@ private:
                 return;
             }
 
-            const uint32_t stable_decodes = (uint32_t) std::max(1, params_base.speculative.kv_stream_mtp_stable_decodes);
+            const uint32_t stable_decodes = (uint32_t) std::max(1, params_base.speculative.kv_stream_spec_stable_decodes);
 
             if (!mtp_ejected) {
                 // the phase plan reports the MTP-active decode capacity; only
@@ -2882,14 +2899,13 @@ private:
                     mtp_capacity_pages = std::min(mtp_capacity_pages, usable);
                 }
 
-                const int32_t eject_pages = std::max(0, params_base.speculative.kv_stream_mtp_eject_pages);
-                const int32_t keep_pages  = std::max(0, params_base.speculative.kv_stream_mtp_keep_pages);
+                const int32_t keep_pages = std::max(0, params_base.speculative.kv_stream_spec_keep_pages);
                 // with a keep threshold, wait until the working set passes it
                 // instead of ejecting as soon as the pool starts streaming
                 const int64_t eject_limit = std::max<int64_t>(
                     (int64_t) mtp_capacity_pages, keep_pages > 0 ? (int64_t) keep_pages : 0);
                 const bool over_limit = eject_limit > 0 &&
-                    (int64_t) st.active_pages + eject_pages > eject_limit;
+                    (int64_t) st.active_pages > eject_limit;
                 const bool trigger = keep_pages > 0 ? over_limit : (st.streaming || over_limit);
                 if (eject_limit == 0 || !trigger) {
                     mtp_stable = 0;
@@ -2898,7 +2914,7 @@ private:
                 if (++mtp_stable < stable_decodes) {
                     return;
                 }
-                mtp_eject();
+                draft_eject();
                 // reset on both outcomes, so a failed eject waits a full window
                 mtp_stable = 0;
                 return;
@@ -2911,13 +2927,13 @@ private:
                 return;
             }
 
-            const int32_t reenable_pages = std::max(0, params_base.speculative.kv_stream_mtp_reenable_pages);
-            const int32_t keep_pages     = std::max(0, params_base.speculative.kv_stream_mtp_keep_pages);
+            const int32_t reenable_pages = std::max(0, params_base.speculative.kv_stream_spec_reenable_pages);
+            const int32_t keep_pages     = std::max(0, params_base.speculative.kv_stream_spec_keep_pages);
             const int64_t reenable_limit = std::max<int64_t>(
                 (int64_t) mtp_capacity_pages, keep_pages > 0 ? (int64_t) keep_pages : 0);
             // without a threshold, streaming blocks re-enable; with one, only
             // the working set matters
-            if ((keep_pages == 0 && st.streaming) || st.mtp_reserved_bytes == 0 || reenable_limit == 0 ||
+            if ((keep_pages == 0 && st.streaming) || st.draft_reserved_bytes == 0 || reenable_limit == 0 ||
                     (int64_t) st.active_pages + reenable_pages > reenable_limit) {
                 mtp_stable = 0;
                 return;
@@ -2925,7 +2941,7 @@ private:
             if (++mtp_stable < stable_decodes) {
                 return;
             }
-            if (!mtp_enable()) {
+            if (!draft_enable()) {
                 // transient; wait another full stable window before retrying
                 mtp_stable = 0;
                 return;
@@ -2937,18 +2953,34 @@ private:
         }
     }
 
-    bool mtp_eject() {
+    // DFlash feeds the target's intermediate layers into the draft; release those
+    // taps before the draft model is freed
+    void clear_draft_target_features() {
+        if (spec_draft_is_mtp || model_dft == nullptr) {
+            return;
+        }
+        const int32_t * ids = llama_model_target_layer_ids(model_dft);
+        const uint32_t n = llama_model_target_layer_ids_n(model_dft);
+        for (uint32_t k = 0; k < n; ++k) {
+            llama_set_embeddings_layer_inp(ctx_tgt, (uint32_t) ids[k], false);
+        }
+    }
+
+    bool draft_eject() {
         llama_kv_stream_status st = {};
         if (!llama_kv_stream_get_status(ctx_tgt, &st)) {
             return false;
         }
 
+        clear_draft_target_features();
         spec_destroy();
         // rewire before the arena toggle, so the slots never reference the freed
         // spec/ctx_dft
         spec_rewire_slots(false);
-        llama_set_embeddings_nextn(ctx_tgt, false, false);
-        const bool toggled = llama_kv_stream_mtp_set(ctx_tgt, false);
+        if (spec_draft_is_mtp) {
+            llama_set_embeddings_nextn(ctx_tgt, false, false);
+        }
+        const bool toggled = llama_kv_stream_draft_set(ctx_tgt, false);
         if (!toggled) {
             return false;
         }
@@ -2956,17 +2988,21 @@ private:
 
         llama_kv_stream_status st2 = {};
         if (llama_kv_stream_get_status(ctx_tgt, &st2)) {
-            SRV_INF("MTP ejected, decode capacity = %u pages/layer, active = %u pages, pool free = %llu bytes\n", (unsigned) mtp_capacity_pages, (unsigned) st.active_pages, (unsigned long long) st2.pool_free_bytes);
+            SRV_INF("draft ejected, decode capacity = %u pages/layer, active = %u pages, pool free = %llu bytes\n", (unsigned) mtp_capacity_pages, (unsigned) st.active_pages, (unsigned long long) st2.pool_free_bytes);
         }
         return true;
     }
 
-    bool mtp_enable() {
-        // order matters: re-pin the arena large before creating the MTP context,
-        // its weights and KV allocate from the pinned region
-        llama_set_embeddings_nextn(ctx_tgt, true, false);
-        if (!llama_kv_stream_mtp_set(ctx_tgt, true)) {
-            llama_set_embeddings_nextn(ctx_tgt, false, false);
+    bool draft_enable() {
+        // order matters: re-pin the arena large before creating the draft context,
+        // its weights allocate from the pinned region
+        if (spec_draft_is_mtp) {
+            llama_set_embeddings_nextn(ctx_tgt, true, false);
+        }
+        if (!llama_kv_stream_draft_set(ctx_tgt, true)) {
+            if (spec_draft_is_mtp) {
+                llama_set_embeddings_nextn(ctx_tgt, false, false);
+            }
             return false;
         }
         // spec_create() can throw and can return true with a null spec/ctx_dft;
@@ -2975,12 +3011,14 @@ private:
         try {
             created = spec_create() && spec != nullptr && ctx_dft != nullptr;
         } catch (const std::exception & e) {
-            SRV_ERR("failed to create MTP context: %s\n", e.what());
+            SRV_ERR("failed to create draft context: %s\n", e.what());
         }
         if (!created) {
             spec_destroy();
-            llama_set_embeddings_nextn(ctx_tgt, false, false);
-            llama_kv_stream_mtp_set(ctx_tgt, false);
+            if (spec_draft_is_mtp) {
+                llama_set_embeddings_nextn(ctx_tgt, false, false);
+            }
+            llama_kv_stream_draft_set(ctx_tgt, false);
             mtp_stable = 0;
             return false;
         }
@@ -2992,7 +3030,7 @@ private:
         spec_rewire_slots(true);
         mtp_ejected = false;
         mtp_capacity_pages = 0;
-        SRV_INF("%s", "MTP re-enabled\n");
+        SRV_INF("%s", "draft re-enabled\n");
         return true;
     }
 
@@ -3010,7 +3048,7 @@ private:
         }
 #endif
 
-        update_mtp_dynamic();
+        update_draft_dynamic();
 
         // check if all slots are idle
         {

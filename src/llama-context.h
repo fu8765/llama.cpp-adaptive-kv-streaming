@@ -64,7 +64,7 @@ struct llama_context {
 
     bool kv_stream_get_status(llama_kv_stream_status * status) const;
 
-    bool kv_stream_mtp_set(bool mtp_active);
+    bool kv_stream_draft_set(bool draft_active);
 
     ggml_backend_sched_t get_sched() const;
 
@@ -340,14 +340,15 @@ private:
     // Declared before memory and scheduler so their arena leases are released first.
     kv_stream_phase_arena_owner kv_stream_phase_arena;
 
-    // captured at construction so the MTP reservation can be restored
+    // captured at construction so the draft reservation can be restored
     bool     spec_mtp_configured = false;
+    bool     spec_draft_configured = false;
     uint32_t spec_n_rs_seq = 0;
     uint32_t spec_n_max_spec_draft = 0;
     uint32_t spec_mtp_kv_tokens = 0;
 
     uint64_t mtp_kv_bytes_per_token() const;
-    uint64_t kv_stream_pinned_bytes_for(bool mtp_active) const;
+    uint64_t kv_stream_pinned_bytes_for(bool draft_active) const;
 
     // size the MTP KV pin to the decode window; used when dynamic MTP owns the pin
     bool kv_stream_mtp_kv_cap_apply();

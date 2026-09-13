@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
-"""Compare dynamic MTP eject against keeping MTP active while streaming.
+"""Compare dynamic draft eject against keeping the draft active while streaming.
 
-Both modes use the automatic MTP KV pin. `default` ejects MTP when the working
-set outgrows the MTP-active pool; `keep` stays active and lets the target stream
-under the smaller pool. Records decode/prefill throughput and the speculative
-draft counters so the crossover can be read off directly.
-"""
+Both modes use the automatic draft KV pin. `default` ejects the draft when the
+working set outgrows the draft-active pool; `keep` stays active and lets the
+target stream under the smaller pool. Records decode/prefill throughput and the
+speculative draft counters so the crossover can be read off directly. Works for
+any pinned draft type (MTP, DFlash) selected with --spec-type."""
+
 
 from __future__ import annotations
 
@@ -36,7 +37,7 @@ def server_argv(mode: str, args: argparse.Namespace) -> list[str]:
         "-ngl", "all",
         "-b", str(args.batch_size),
         "-ub", str(args.ubatch_size),
-        "--spec-type", "draft-mtp",
+        "--spec-type", args.spec_type,
         "-np", "1",
         "--no-mmproj",
         "--no-warmup",
@@ -44,18 +45,17 @@ def server_argv(mode: str, args: argparse.Namespace) -> list[str]:
         "--reasoning-format", "none",
         "--kv-stream-arena-mib", str(args.arena_mib),
         "--spec-draft-n-max", str(args.spec_draft_n_max),
-        "--model-draft", str(args.mtp_model),
+        "--model-draft", str(args.draft_model or args.mtp_model),
         "--spec-draft-ngl", "all",
         "-ctkd", args.draft_cache_type_k,
         "-ctvd", args.draft_cache_type_v,
-        "--kv-stream-mtp-dynamic",
-        "--kv-stream-mtp-eject-pages", "0",
-        "--kv-stream-mtp-reenable-pages", "8",
-        "--kv-stream-mtp-stable-decodes", "4",
+        "--kv-stream-spec-dynamic",
+        "--kv-stream-spec-reenable-pages", "8",
+        "--kv-stream-spec-stable-decodes", "4",
         "-lv", "5",
     ]
     if mode == "keep":
-        argv += ["--kv-stream-mtp-keep-pages", str(args.keep_pages)]
+        argv += ["--kv-stream-spec-keep-pages", str(args.keep_pages)]
     return argv
 
 
@@ -124,6 +124,7 @@ def run_point(
             print(f"warning: {mode} ctx {context}: decoded {predicted_n} of {args.decode_tokens}")
         log_text = log_path.read_text(errors="replace")
         cap = um.MTP_CAP_RE.search(log_text)
+        eject = um.MTP_EJECT_RE.search(log_text)
         return {
             "type": "measurement",
             "status": "ok",
@@ -134,7 +135,7 @@ def run_point(
             "decode_tokens": args.decode_tokens,
             "decode_actual": predicted_n,
             "arena_mib": args.arena_mib,
-            "spec_type": "draft-mtp",
+            "spec_type": args.spec_type,
             "prefill_tps": timings.get("prompt_per_second"),
             "decode_tps": timings.get("predicted_per_second"),
             "prompt_ms": timings.get("prompt_ms"),
@@ -143,7 +144,8 @@ def run_point(
             "draft_n_accepted": timings.get("draft_n_accepted"),
             "mtp_pin_pages": int(cap.group(1)) if cap else None,
             "mtp_window_pages": int(cap.group(3)) if cap else None,
-            "mtp_ejected": bool(um.MTP_EJECT_RE.search(log_text)),
+            "ejected_pages": int(eject.group(1)) if eject else None,
+            "mtp_ejected": bool(eject),
             "draft_errors": log_text.count("llama_decode(ctx_dft)"),
         }
     finally:
@@ -155,7 +157,7 @@ def write_csv(path: Path, results: dict[tuple[str, int], dict]) -> None:
         "mode", "context", "n_ctx", "prompt_tokens", "decode_tokens",
         "decode_actual", "arena_mib", "prefill_tps", "decode_tps", "prompt_ms", "predicted_ms",
         "draft_n", "draft_n_accepted", "mtp_pin_pages", "mtp_window_pages",
-        "mtp_ejected", "draft_errors",
+        "ejected_pages", "mtp_ejected", "draft_errors",
     ]
     with path.open("w", newline="") as stream:
         writer = csv.DictWriter(stream, fieldnames=columns, extrasaction="ignore")
@@ -164,12 +166,12 @@ def write_csv(path: Path, results: dict[tuple[str, int], dict]) -> None:
             writer.writerow(results[key])
 
 
-def plot_results(output_dir: Path, results: dict[tuple[str, int], dict], plt) -> None:
+def plot_results(output_dir: Path, results: dict[tuple[str, int], dict], plt, tag: str) -> None:
     if not results:
         return
     styles = {
         "default": ("#1f77b4", "o", "dynamic eject (default)"),
-        "keep": ("#d62728", "s", "keep MTP while streaming"),
+        "keep": ("#d62728", "s", "keep draft while streaming"),
     }
     fig, axes = plt.subplots(2, 1, figsize=(11, 9), constrained_layout=True)
     for mode in MODES:
@@ -204,7 +206,7 @@ def plot_results(output_dir: Path, results: dict[tuple[str, int], dict], plt) ->
                     color=color,
                 )
     for suffix in ("png", "svg"):
-        fig.savefig(output_dir / f"mtp-streaming.{suffix}", dpi=150)
+        fig.savefig(output_dir / f"{tag}-streaming.{suffix}", dpi=150)
     plt.close(fig)
 
 
@@ -212,7 +214,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--server", type=Path, default=ROOT / "build/bin/llama-server")
     parser.add_argument("--model", type=Path, required=True)
-    parser.add_argument("--mtp-model", type=Path, required=True)
+    parser.add_argument("--mtp-model", type=Path, default=None)
+    parser.add_argument("--draft-model", type=Path, default=None,
+                        help="draft model path; falls back to --mtp-model")
+    parser.add_argument("--spec-type", default="draft-mtp",
+                        help="draft-mtp, draft-dflash or draft-dspark")
+    parser.add_argument("--tag", default="mtp", help="output filename prefix")
     parser.add_argument("--contexts", type=um.parse_context_list,
                         default=[50000, 80000, 120000, 160000])
     parser.add_argument("--n-ctx", type=int, default=160000)
@@ -252,6 +259,8 @@ def load_results(path: Path) -> dict[tuple[str, int], dict]:
 
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
+    if args.draft_model is None and args.mtp_model is None:
+        raise SystemExit("provide --draft-model (or --mtp-model)")
     args.output_dir.mkdir(parents=True, exist_ok=True)
     logs = args.output_dir / "logs"
     logs.mkdir(exist_ok=True)
@@ -286,7 +295,7 @@ def main(argv: list[str] | None = None) -> int:
     write_csv(args.output_dir / "results.csv", results)
     plt = bks.require_matplotlib()
     plt.switch_backend("Agg")
-    plot_results(args.output_dir, results, plt)
+    plot_results(args.output_dir, results, plt, args.tag)
     print(json.dumps({"points": len(results), "output": str(args.output_dir)}), flush=True)
     return 0
 

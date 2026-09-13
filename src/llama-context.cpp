@@ -89,24 +89,26 @@ uint64_t llama_context::mtp_kv_bytes_per_token() const {
          + uint64_t(ggml_row_size(cparams.mtp_kv_type_v, hparams.n_embd_v_gqa(il)));
 }
 
-uint64_t llama_context::kv_stream_pinned_bytes_for(bool mtp_active) const {
+uint64_t llama_context::kv_stream_pinned_bytes_for(bool draft_active) const {
     const auto & hparams = model.hparams;
 
-    if (!spec_mtp_configured) {
+    if (!spec_draft_configured) {
         return 0;
     }
 
     uint64_t pinned = 0;
 
-    if (mtp_active && hparams.n_layer_nextn > 0) {
+    // only the MTP head has its KV in the pin; a separate draft (DFlash) keeps
+    // its SWA-windowed KV on regular memory
+    if (draft_active && spec_mtp_configured && hparams.n_layer_nextn > 0) {
         const uint64_t per_token = mtp_kv_bytes_per_token();
         pinned += (per_token*spec_mtp_kv_tokens + 127ULL) & ~127ULL;
     }
-    if (mtp_active) {
-        pinned += (cparams.mtp_weights_bytes + 127ULL) & ~127ULL;
+    if (draft_active) {
+        pinned += (cparams.draft_weights_bytes + 127ULL) & ~127ULL;
     }
 
-    const uint32_t n_rs = mtp_active ? spec_n_rs_seq : 0;
+    const uint32_t n_rs = draft_active ? spec_n_rs_seq : 0;
     const uint64_t n_rows = uint64_t(std::max(1u, cparams.n_seq_max))*(1ULL + n_rs);
     uint64_t rs_bytes = 0;
     for (uint32_t il = 0; il < hparams.n_layer(); ++il) {
@@ -165,7 +167,8 @@ llama_context::llama_context(
     cparams.kv_stream_arena_mib     = params.kv_stream_arena_mib;
     cparams.n_max_spec_draft        = params.n_max_spec_draft;
     cparams.spec_mtp                = params.spec_mtp;
-    cparams.mtp_weights_bytes       = params.mtp_weights_bytes;
+    cparams.spec_draft              = params.spec_draft;
+    cparams.draft_weights_bytes     = params.draft_weights_bytes;
     cparams.kv_stream_mtp_kv_pages  = params.kv_stream_mtp_kv_pages;
     cparams.kv_stream_mtp_dynamic   = params.kv_stream_mtp_dynamic;
     cparams.mtp_kv_type_k           = params.mtp_kv_type_k;
@@ -437,6 +440,7 @@ llama_context::llama_context(
     // init the memory module
     if (!hparams.vocab_only) {
         spec_mtp_configured   = cparams.spec_mtp;
+        spec_draft_configured = cparams.spec_draft;
         spec_n_rs_seq         = cparams.n_rs_seq;
         spec_n_max_spec_draft = cparams.n_max_spec_draft;
 
@@ -538,11 +542,11 @@ llama_context::llama_context(
             kv_stream_minimum_stage_bytes = (bootstrap_raw + 127ULL) & ~127ULL;
 
             const uint64_t kv_stream_pinned_bytes =
-                kv_stream_pinned_bytes_for(spec_mtp_configured);
+                kv_stream_pinned_bytes_for(spec_draft_configured);
             if (kv_stream_pinned_bytes >= kv_stream_arena_bytes ||
                     kv_stream_minimum_stage_bytes >= kv_stream_arena_bytes - kv_stream_pinned_bytes) {
                 throw std::runtime_error(
-                    "block KV streaming arena is too small for the MTP cache and bootstrap KV");
+                    "block KV streaming arena is too small for the draft cache and bootstrap KV");
             }
             const uint64_t kv_stream_effective_arena_bytes =
                 kv_stream_arena_bytes - kv_stream_pinned_bytes;
@@ -604,7 +608,7 @@ llama_context::llama_context(
                         kv_stream_phase_arena.arena,
                         kv_stream_arena_bytes - kv_stream_pinned_bytes,
                         kv_stream_pinned_bytes)) {
-                    throw std::runtime_error("failed to pin the MTP KV region in the phase arena");
+                    throw std::runtime_error("failed to pin the draft region in the phase arena");
                 }
                 kv_stream_phase_arena.pinned_buffer_type =
                     arena_pinned_buffer_type_fn(kv_stream_phase_arena.arena);
@@ -642,7 +646,7 @@ llama_context::llama_context(
                                             ? params.ctx_other->kv_stream_phase_arena.pinned_buffer_type
                                             : nullptr,
             /*.rs_secondary_buft    =*/ cparams.ctx_type == LLAMA_CONTEXT_TYPE_DEFAULT &&
-                                        spec_mtp_configured
+                                        spec_draft_configured
                                             ? kv_stream_phase_arena.pinned_buffer_type
                                             : nullptr,
         };
@@ -1317,7 +1321,7 @@ bool llama_context::kv_stream_get_status(llama_kv_stream_status * status) const 
     status->layer_count = kv->kv_stream_layer_count();
     status->page_bytes = kv->kv_stream_page_bytes();
     status->pool_free_bytes = kv->kv_stream_pool_free_bytes();
-    status->mtp_reserved_bytes = spec_mtp_configured
+    status->draft_reserved_bytes = spec_draft_configured
         ? kv_stream_pinned_bytes_for(true) - kv_stream_pinned_bytes_for(false)
         : 0;
     status->mtp_kv_pages = spec_mtp_configured ? spec_mtp_kv_tokens/256 : 0;
@@ -1445,16 +1449,16 @@ bool llama_context::kv_stream_mtp_kv_cap_apply() {
     return true;
 }
 
-bool llama_context::kv_stream_mtp_set(bool mtp_active) {
+bool llama_context::kv_stream_draft_set(bool draft_active) {
     auto & arena = kv_stream_phase_arena;
 
     if (!arena.configured) {
         return false;
     }
-    if (mtp_active && !spec_mtp_configured) {
+    if (draft_active && !spec_draft_configured) {
         return false;
     }
-    if (cparams.spec_mtp == mtp_active) {
+    if (cparams.spec_draft == draft_active) {
         return true;
     }
 
@@ -1485,7 +1489,7 @@ bool llama_context::kv_stream_mtp_set(bool mtp_active) {
         const uint64_t pinned = kv_stream_pinned_bytes_for(n_rs_seq != 0);
         if (!pin_fits(pinned)) {
             LLAMA_LOG_ERROR("%s: arena too small for the %s pin (%llu bytes)\n", __func__,
-                    n_rs_seq != 0 ? "MTP" : "small", (unsigned long long) pinned);
+                    n_rs_seq != 0 ? "draft" : "small", (unsigned long long) pinned);
             return false;
         }
         arena.reset_pinned_fn(arena.arena);
@@ -1499,8 +1503,8 @@ bool llama_context::kv_stream_mtp_set(bool mtp_active) {
         return true;
     };
 
-    if (!pin_fits(kv_stream_pinned_bytes_for(mtp_active))) {
-        LLAMA_LOG_ERROR("%s: requested MTP layout does not fit in the arena\n", __func__);
+    if (!pin_fits(kv_stream_pinned_bytes_for(draft_active))) {
+        LLAMA_LOG_ERROR("%s: requested draft layout does not fit in the arena\n", __func__);
         return false;
     }
 
@@ -1511,14 +1515,14 @@ bool llama_context::kv_stream_mtp_set(bool mtp_active) {
 
     synchronize();
     if (sched && !arena.graph_reset_fn(backend_ptrs[arena.backend_index])) {
-        LLAMA_LOG_ERROR("%s: failed to invalidate CUDA graphs before MTP toggle\n", __func__);
+        LLAMA_LOG_ERROR("%s: failed to invalidate CUDA graphs before draft toggle\n", __func__);
         return false;
     }
     gf_res_prev->reset();
     gf_res_reserve->reset();
     sched.reset();
 
-    const auto result = mem_recr->rebuild(mtp_active ? spec_n_rs_seq : 0, repin);
+    const auto result = mem_recr->rebuild(draft_active ? spec_n_rs_seq : 0, repin);
 
     auto reserve = [&]() -> bool {
         sched_need_reserve = true;
@@ -1526,7 +1530,7 @@ bool llama_context::kv_stream_mtp_set(bool mtp_active) {
             sched_reserve();
             return true;
         } catch (const std::exception & e) {
-            LLAMA_LOG_ERROR("%s: failed to re-reserve after the MTP toggle: %s\n", __func__, e.what());
+            LLAMA_LOG_ERROR("%s: failed to re-reserve after the draft toggle: %s\n", __func__, e.what());
             return false;
         }
     };
@@ -1540,25 +1544,25 @@ bool llama_context::kv_stream_mtp_set(bool mtp_active) {
             reserve();
             return false;
         case llama_memory_recurrent::REBUILD_ALLOC_FAILED_RESTORED:
-            LLAMA_LOG_ERROR("%s: MTP toggle failed, previous layout restored\n", __func__);
+            LLAMA_LOG_ERROR("%s: draft toggle failed, previous layout restored\n", __func__);
             reserve();
             return false;
         case llama_memory_recurrent::REBUILD_ALLOC_FAILED_UNUSABLE:
-            LLAMA_LOG_ERROR("%s: MTP toggle failed and the recurrent cache could not be restored; context is unusable\n", __func__);
+            LLAMA_LOG_ERROR("%s: draft toggle failed and the recurrent cache could not be restored; context is unusable\n", __func__);
             sched_need_reserve = false;
             return false;
     }
 
-    cparams.spec_mtp         = mtp_active;
-    cparams.n_rs_seq         = mtp_active ? spec_n_rs_seq : 0;
-    cparams.n_max_spec_draft = mtp_active ? spec_n_max_spec_draft : 0;
+    cparams.spec_draft       = draft_active;
+    cparams.n_rs_seq         = draft_active ? spec_n_rs_seq : 0;
+    cparams.n_max_spec_draft = draft_active ? spec_n_max_spec_draft : 0;
 
     if (!reserve()) {
         return false;
     }
 
-    LLAMA_LOG_INFO("%s: MTP %s, pinned = %.2f MiB, arena = %.2f MiB\n", __func__,
-            mtp_active ? "enabled" : "ejected",
+    LLAMA_LOG_INFO("%s: draft %s, pinned = %.2f MiB, arena = %.2f MiB\n", __func__,
+            draft_active ? "enabled" : "ejected",
             arena.pinned_bytes/1024.0/1024.0, arena.arena_bytes/1024.0/1024.0);
     return true;
 }
@@ -4508,7 +4512,8 @@ llama_context_params llama_context_default_params() {
         /*.kv_stream_arena_mib         =*/ 0,
         /*.n_max_spec_draft            =*/ 0,
         /*.spec_mtp                   =*/ false,
-        /*.mtp_weights_bytes          =*/ 0,
+        /*.spec_draft                 =*/ false,
+        /*.draft_weights_bytes        =*/ 0,
         /*.kv_stream_mtp_kv_pages     =*/ 0,
         /*.kv_stream_mtp_dynamic      =*/ false,
         /*.mtp_kv_type_k               =*/ GGML_TYPE_F16,
@@ -5210,11 +5215,11 @@ ggml_backend_buffer_type_t llama_kv_stream_pinned_buft(struct llama_context * ct
     return ctx->get_kv_stream_pinned_buft();
 }
 
-bool llama_kv_stream_mtp_set(llama_context * ctx, bool mtp_active) {
+bool llama_kv_stream_draft_set(llama_context * ctx, bool draft_active) {
     try {
-        return ctx->kv_stream_mtp_set(mtp_active);
+        return ctx->kv_stream_draft_set(draft_active);
     } catch (const std::exception & e) {
-        LLAMA_LOG_ERROR("%s: exception during MTP toggle: %s\n", __func__, e.what());
+        LLAMA_LOG_ERROR("%s: exception during draft toggle: %s\n", __func__, e.what());
         return false;
     }
 }

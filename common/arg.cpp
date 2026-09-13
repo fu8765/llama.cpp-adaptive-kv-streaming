@@ -888,21 +888,14 @@ static bool common_params_parse_ex(int argc, char ** argv, common_params_context
     // parse all CLI args now, so that -hf is available below for remote preset resolution
     parse_cli_args();
 
-    if (params.speculative.kv_stream_mtp_dynamic &&
-            params.speculative.kv_stream_mtp_reenable_pages <= params.speculative.kv_stream_mtp_eject_pages) {
+    if (!params.speculative.kv_stream_spec_dynamic && params.speculative.kv_stream_spec_kv_pages != 0) {
         throw std::invalid_argument(string_format(
-            "error: --kv-stream-mtp-reenable-pages (%d) must be greater than --kv-stream-mtp-eject-pages (%d)\n",
-            params.speculative.kv_stream_mtp_reenable_pages, params.speculative.kv_stream_mtp_eject_pages));
+            "error: --kv-stream-spec-kv-pages (%d) requires --kv-stream-spec-dynamic\n",
+            params.speculative.kv_stream_spec_kv_pages));
     }
 
-    if (!params.speculative.kv_stream_mtp_dynamic && params.speculative.kv_stream_mtp_kv_pages != 0) {
-        throw std::invalid_argument(string_format(
-            "error: --kv-stream-mtp-kv-pages (%d) requires --kv-stream-mtp-dynamic\n",
-            params.speculative.kv_stream_mtp_kv_pages));
-    }
-
-    if (params.speculative.kv_stream_mtp_keep_pages != 0 && !params.speculative.kv_stream_mtp_dynamic) {
-        throw std::invalid_argument("error: --kv-stream-mtp-keep-pages requires --kv-stream-mtp-dynamic\n");
+    if (params.speculative.kv_stream_spec_keep_pages != 0 && !params.speculative.kv_stream_spec_dynamic) {
+        throw std::invalid_argument("error: --kv-stream-spec-keep-pages requires --kv-stream-spec-dynamic\n");
     }
 
     postprocess_cpu_params(params.cpuparams,       nullptr);
@@ -4199,62 +4192,52 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
         }
     ).set_spec().set_examples({LLAMA_EXAMPLE_SPECULATIVE, LLAMA_EXAMPLE_LOOKUP, LLAMA_EXAMPLE_SERVER, LLAMA_EXAMPLE_CLI}).set_env("LLAMA_ARG_SPEC_DRAFT_N_MIN"));
     add_opt(common_arg(
-        {"--kv-stream-mtp-dynamic"},
-        string_format("eject MTP when the active pages reach the MTP-active decode capacity or the KV pool streams, and re-enable it when it fits again; requires MTP to be the only spec type (default: %s)", params.speculative.kv_stream_mtp_dynamic ? "enabled" : "disabled"),
+        {"--kv-stream-spec-dynamic", "--kv-stream-mtp-dynamic"},
+        string_format("eject the draft when the active pages reach the decode capacity or the KV pool streams, and re-enable it when it fits again; requires the draft to be the only spec type (default: %s)", params.speculative.kv_stream_spec_dynamic ? "enabled" : "disabled"),
         [](common_params & params) {
-            params.speculative.kv_stream_mtp_dynamic = true;
+            params.speculative.kv_stream_spec_dynamic = true;
         }
-    ).set_spec().set_examples({LLAMA_EXAMPLE_SERVER}).set_env("LLAMA_ARG_KV_STREAM_MTP_DYNAMIC"));
+    ).set_spec().set_examples({LLAMA_EXAMPLE_SERVER}).set_env("LLAMA_ARG_KV_STREAM_SPEC_DYNAMIC"));
     add_opt(common_arg(
-        {"--kv-stream-mtp-keep-pages"}, "N",
-        string_format("keep MTP active until the decode working set exceeds N pages (256 tokens each), then eject; 0 ejects at streaming onset (default: %d)", params.speculative.kv_stream_mtp_keep_pages),
+        {"--kv-stream-spec-keep-pages", "--kv-stream-mtp-keep-pages"}, "N",
+        string_format("keep the draft active until the decode working set exceeds N pages (256 tokens each), then eject; 0 ejects at streaming onset (default: %d)", params.speculative.kv_stream_spec_keep_pages),
         [](common_params & params, int value) {
             if (value < 0) {
-                throw std::invalid_argument("kv-stream MTP keep pages must be non-negative");
+                throw std::invalid_argument("kv-stream spec keep pages must be non-negative");
             }
-            params.speculative.kv_stream_mtp_keep_pages = value;
+            params.speculative.kv_stream_spec_keep_pages = value;
         }
-    ).set_spec().set_examples({LLAMA_EXAMPLE_SERVER}).set_env("LLAMA_ARG_KV_STREAM_MTP_KEEP_PAGES"));
+    ).set_spec().set_examples({LLAMA_EXAMPLE_SERVER}).set_env("LLAMA_ARG_KV_STREAM_SPEC_KEEP_PAGES"));
     add_opt(common_arg(
-        {"--kv-stream-mtp-eject-pages"}, "N",
-        string_format("eject MTP when the active pages exceed the MTP-active decode capacity by this many pages (default: %d)", params.speculative.kv_stream_mtp_eject_pages),
+        {"--kv-stream-spec-reenable-pages", "--kv-stream-mtp-reenable-pages"}, "N",
+        string_format("re-enable the draft when the active pages fit below the decode capacity by this many pages (default: %d)", params.speculative.kv_stream_spec_reenable_pages),
         [](common_params & params, int value) {
             if (value < 0) {
-                throw std::invalid_argument("kv-stream MTP eject pages must be non-negative");
+                throw std::invalid_argument("kv-stream spec re-enable pages must be non-negative");
             }
-            params.speculative.kv_stream_mtp_eject_pages = value;
+            params.speculative.kv_stream_spec_reenable_pages = value;
         }
-    ).set_spec().set_examples({LLAMA_EXAMPLE_SERVER}).set_env("LLAMA_ARG_KV_STREAM_MTP_EJECT_PAGES"));
+    ).set_spec().set_examples({LLAMA_EXAMPLE_SERVER}).set_env("LLAMA_ARG_KV_STREAM_SPEC_REENABLE_PAGES"));
     add_opt(common_arg(
-        {"--kv-stream-mtp-reenable-pages"}, "N",
-        string_format("re-enable MTP when the active pages fit below the MTP-active decode capacity by this many pages (default: %d)", params.speculative.kv_stream_mtp_reenable_pages),
+        {"--kv-stream-spec-stable-decodes", "--kv-stream-mtp-stable-decodes"}, "N",
+        string_format("consecutive controller checks before a transition (default: %d)", params.speculative.kv_stream_spec_stable_decodes),
         [](common_params & params, int value) {
             if (value < 0) {
-                throw std::invalid_argument("kv-stream MTP re-enable pages must be non-negative");
+                throw std::invalid_argument("kv-stream spec stable decodes must be non-negative");
             }
-            params.speculative.kv_stream_mtp_reenable_pages = value;
+            params.speculative.kv_stream_spec_stable_decodes = value;
         }
-    ).set_spec().set_examples({LLAMA_EXAMPLE_SERVER}).set_env("LLAMA_ARG_KV_STREAM_MTP_REENABLE_PAGES"));
+    ).set_spec().set_examples({LLAMA_EXAMPLE_SERVER}).set_env("LLAMA_ARG_KV_STREAM_SPEC_STABLE_DECODES"));
     add_opt(common_arg(
-        {"--kv-stream-mtp-stable-decodes"}, "N",
-        string_format("consecutive controller checks before a transition (default: %d)", params.speculative.kv_stream_mtp_stable_decodes),
+        {"--kv-stream-spec-kv-pages", "--kv-stream-mtp-kv-pages"}, "N",
+        string_format("pin the draft KV region for N decode-window pages (256 tokens each); 0 pins the decode window (default: %d)", params.speculative.kv_stream_spec_kv_pages),
         [](common_params & params, int value) {
             if (value < 0) {
-                throw std::invalid_argument("kv-stream MTP stable decodes must be non-negative");
+                throw std::invalid_argument("kv-stream spec KV pages must be non-negative");
             }
-            params.speculative.kv_stream_mtp_stable_decodes = value;
+            params.speculative.kv_stream_spec_kv_pages = value;
         }
-    ).set_spec().set_examples({LLAMA_EXAMPLE_SERVER}).set_env("LLAMA_ARG_KV_STREAM_MTP_STABLE_DECODES"));
-    add_opt(common_arg(
-        {"--kv-stream-mtp-kv-pages"}, "N",
-        string_format("pin the MTP KV region for N decode-window pages (256 tokens each); 0 pins the MTP-active decode window (default: %d)", params.speculative.kv_stream_mtp_kv_pages),
-        [](common_params & params, int value) {
-            if (value < 0) {
-                throw std::invalid_argument("kv-stream MTP KV pages must be non-negative");
-            }
-            params.speculative.kv_stream_mtp_kv_pages = value;
-        }
-    ).set_spec().set_examples({LLAMA_EXAMPLE_SERVER}).set_env("LLAMA_ARG_KV_STREAM_MTP_KV_PAGES"));
+    ).set_spec().set_examples({LLAMA_EXAMPLE_SERVER}).set_env("LLAMA_ARG_KV_STREAM_SPEC_KV_PAGES"));
     add_opt(common_arg(
         {"--spec-synth-len"}, "L",
         "target mean synthetic acceptance length, including the target token (benchmarking only)",

@@ -57,7 +57,8 @@ struct llama_cparams {
     uint32_t kv_stream_arena_mib;
     uint32_t n_max_spec_draft;
     bool     spec_mtp;
-    size_t   mtp_weights_bytes;
+    bool     spec_draft;
+    size_t   draft_weights_bytes;
     uint32_t kv_stream_mtp_kv_pages;
     bool     kv_stream_mtp_dynamic;
     ggml_type mtp_kv_type_k;
