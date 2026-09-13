@@ -11,7 +11,7 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
-          ref: feature/adaptive-kv-stream # Ensures feature branch is checked out
+          ref: feature/adaptive-kv-stream
 
       - name: Verify Adaptive KV source
         shell: pwsh
@@ -33,13 +33,7 @@ jobs:
       - name: Setup Visual Studio Developer Environment
         uses: ilammy/msvc-dev-cmd@v1
 
-      - name: Show CUDA version
-        shell: pwsh
-        run: |
-          $env:PATH = "${{ steps.cuda.outputs.CUDA_PATH }}\bin;" + $env:PATH
-          nvcc --version
-
-      - name: Configure CMake
+      - name: Configure CMake for Blackwell (sm120)
         shell: pwsh
         run: |
           if (Test-Path build) {
@@ -58,9 +52,8 @@ jobs:
         shell: pwsh
         run: |
           $env:PATH = "${{ steps.cuda.outputs.CUDA_PATH }}\bin;" + $env:PATH
-          cmake --build build `
-            --target llama-server `
-            -j 4
+          # Limit compilation to 2 parallel jobs to stay within GitHub runner RAM limits
+          cmake --build build --target llama-server -j 2
 
       - name: Verify Adaptive KV in compiled binary
         shell: pwsh
@@ -72,7 +65,7 @@ jobs:
             throw "ERROR: llama-server.exe was not found in build directory."
           }
 
-          Write-Host "Performing static string inspection on compiled binary..."
+          Write-Host "Performing static string inspection on binary..."
           $bytes = [System.IO.File]::ReadAllBytes($server)
           $text = [System.Text.Encoding]::UTF8.GetString($bytes)
 
@@ -88,8 +81,9 @@ jobs:
           $targetDir = Get-Item "build\bin", "build\bin\Release" | Where-Object { Test-Path $_ } | Select-Object -First 1
           $cudaBin = "${{ steps.cuda.outputs.CUDA_PATH }}\bin"
           
-          Write-Host "Bundling CUDA runtime DLLs for release artifact..."
-          Get-ChildItem -Path $cudaBin -Filter "*.dll" | Copy-Item -Destination $targetDir.FullName -Force
+          Write-Host "Bundling CUDA runtime DLLs..."
+          Get-ChildItem -Path $cudaBin -Filter "cudart64_*.dll" | Copy-Item -Destination $targetDir.FullName -Force
+          Get-ChildItem -Path $cudaBin -Filter "cublas*.dll" | Copy-Item -Destination $targetDir.FullName -Force
 
       - name: Upload Windows Binary Artifact
         uses: actions/upload-artifact@v4
