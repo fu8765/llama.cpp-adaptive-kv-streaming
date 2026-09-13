@@ -71,9 +71,8 @@ jobs:
           $targetDir = Get-Item "build\bin", "build\bin\Release" | Where-Object { Test-Path $_ } | Select-Object -First 1
           $cudaBin = "${{ steps.cuda.outputs.CUDA_PATH }}\bin"
           
-          Write-Host "Copying CUDA runtime binaries to output directory..."
-          Get-ChildItem -Path $cudaBin -Filter "cudart64_*.dll" | Copy-Item -Destination $targetDir.FullName -Force
-          Get-ChildItem -Path $cudaBin -Filter "cublas*.dll" | Copy-Item -Destination $targetDir.FullName -Force
+          Write-Host "Copying all CUDA runtime binaries to target directory..."
+          Get-ChildItem -Path $cudaBin -Filter "*.dll" | Copy-Item -Destination $targetDir.FullName -Force
 
       - name: Verify Adaptive KV in compiled binary
         shell: pwsh
@@ -89,23 +88,20 @@ jobs:
             throw "ERROR: llama-server.exe was not found in build directory."
           }
 
-          $p = Start-Process -FilePath $server -ArgumentList "--help" -WorkingDirectory $binDir -NoNewWindow -Wait -PassThru -RedirectStandardOutput "out.txt" -RedirectStandardError "err.txt"
-
-          Write-Host "Process Exit Code: $($p.ExitCode)"
-          $out = Get-Content "out.txt" -Raw -ErrorAction SilentlyContinue
-          $err = Get-Content "err.txt" -Raw -ErrorAction SilentlyContinue
-
-          if ($p.ExitCode -ne 0 -and -not $out) {
-            Write-Host "--- STDERR OUTPUT ---"
-            Write-Host $err
-            throw "ERROR: llama-server.exe failed to run (Exit code $($p.ExitCode))."
+          Push-Location $binDir
+          try {
+            $out = & .\llama-server.exe --help 2>&1 | Out-String
+          } finally {
+            Pop-Location
           }
 
-          if ($out -notmatch "kv-stream-stage-mib" -and $err -notmatch "kv-stream-stage-mib") {
-            Write-Host "--- STDOUT SAMPLE ---"
-            Get-Content "out.txt" -ErrorAction SilentlyContinue | Select-Object -First 25
-            Write-Host "--- STDERR SAMPLE ---"
-            Get-Content "err.txt" -ErrorAction SilentlyContinue | Select-Object -First 25
+          if ($LASTEXITCODE -ne 0 -and -not $out) {
+            throw "ERROR: llama-server.exe failed to run (Exit code $LASTEXITCODE)."
+          }
+
+          if ($out -notmatch "kv-stream-stage-mib") {
+            Write-Host "--- OUTPUT SAMPLE ---"
+            Write-Host ($out -split "`n" | Select-Object -First 30 | Out-String)
             throw "ERROR: --kv-stream-stage-mib flag is NOT present in the compiled binary."
           }
 
