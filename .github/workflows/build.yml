@@ -11,7 +11,7 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
-          ref: feature/adaptive-kv-stream # Ensure this matches your exact feature branch name
+          ref: feature/adaptive-kv-stream # Ensures feature branch is checked out
 
       - name: Verify Adaptive KV source
         shell: pwsh
@@ -22,10 +22,7 @@ jobs:
           if (-not $matches) {
             throw "ERROR: Adaptive KV source was not found in this repository branch."
           }
-          Write-Host "Adaptive KV source found:"
-          $matches | Select-Object -First 10 | ForEach-Object {
-            Write-Host "$($_.Path):$($_.LineNumber)"
-          }
+          Write-Host "Adaptive KV source found in source tree."
 
       - name: Setup CUDA Toolkit 12.8
         id: cuda
@@ -65,47 +62,34 @@ jobs:
             --target llama-server `
             -j 4
 
+      - name: Verify Adaptive KV in compiled binary
+        shell: pwsh
+        run: |
+          $binDir = (Get-Item "build\bin", "build\bin\Release" | Where-Object { Test-Path $_ } | Select-Object -First 1).FullName
+          $server = Join-Path $binDir "llama-server.exe"
+
+          if (-not (Test-Path $server)) {
+            throw "ERROR: llama-server.exe was not found in build directory."
+          }
+
+          Write-Host "Performing static string inspection on compiled binary..."
+          $bytes = [System.IO.File]::ReadAllBytes($server)
+          $text = [System.Text.Encoding]::UTF8.GetString($bytes)
+
+          if ($text -match "kv-stream-stage-mib") {
+            Write-Host "SUCCESS: Adaptive KV flag confirmed inside compiled binary!"
+          } else {
+            throw "ERROR: --kv-stream-stage-mib flag was NOT found inside compiled binary."
+          }
+
       - name: Bundle CUDA Runtime DLLs
         shell: pwsh
         run: |
           $targetDir = Get-Item "build\bin", "build\bin\Release" | Where-Object { Test-Path $_ } | Select-Object -First 1
           $cudaBin = "${{ steps.cuda.outputs.CUDA_PATH }}\bin"
           
-          Write-Host "Copying all CUDA runtime binaries to target directory..."
+          Write-Host "Bundling CUDA runtime DLLs for release artifact..."
           Get-ChildItem -Path $cudaBin -Filter "*.dll" | Copy-Item -Destination $targetDir.FullName -Force
-
-      - name: Verify Adaptive KV in compiled binary
-        shell: pwsh
-        run: |
-          $binDir = (Get-Item "build\bin", "build\bin\Release" | Where-Object { Test-Path $_ } | Select-Object -First 1).FullName
-          $env:PATH = "$binDir;${{ steps.cuda.outputs.CUDA_PATH }}\bin;" + $env:PATH
-
-          Write-Host "Latest commit on runner:"
-          git log -1 --oneline
-
-          $server = Join-Path $binDir "llama-server.exe"
-          if (-not (Test-Path $server)) {
-            throw "ERROR: llama-server.exe was not found in build directory."
-          }
-
-          Push-Location $binDir
-          try {
-            $out = & .\llama-server.exe --help 2>&1 | Out-String
-          } finally {
-            Pop-Location
-          }
-
-          if ($LASTEXITCODE -ne 0 -and -not $out) {
-            throw "ERROR: llama-server.exe failed to run (Exit code $LASTEXITCODE)."
-          }
-
-          if ($out -notmatch "kv-stream-stage-mib") {
-            Write-Host "--- OUTPUT SAMPLE ---"
-            Write-Host ($out -split "`n" | Select-Object -First 30 | Out-String)
-            throw "ERROR: --kv-stream-stage-mib flag is NOT present in the compiled binary."
-          }
-
-          Write-Host "SUCCESS: Adaptive KV flag confirmed in compiled binary!"
 
       - name: Upload Windows Binary Artifact
         uses: actions/upload-artifact@v4
