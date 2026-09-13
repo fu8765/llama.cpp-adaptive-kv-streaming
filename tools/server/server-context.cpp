@@ -2857,7 +2857,6 @@ private:
         if (!spec_mtp_enabled_dynamic || ctx_tgt == nullptr) {
             return;
         }
-
         try {
             llama_kv_stream_status st = {};
             if (!llama_kv_stream_get_status(ctx_tgt, &st) || !st.enabled) {
@@ -2884,9 +2883,15 @@ private:
                 }
 
                 const int32_t eject_pages = std::max(0, params_base.speculative.kv_stream_mtp_eject_pages);
-                const bool over_capacity = mtp_capacity_pages > 0 &&
-                    (int64_t) st.active_pages + eject_pages > (int64_t) mtp_capacity_pages;
-                if (mtp_capacity_pages == 0 || (!st.streaming && !over_capacity)) {
+                const int32_t keep_pages  = std::max(0, params_base.speculative.kv_stream_mtp_keep_pages);
+                // with a keep threshold, wait until the working set passes it
+                // instead of ejecting as soon as the pool starts streaming
+                const int64_t eject_limit = std::max<int64_t>(
+                    (int64_t) mtp_capacity_pages, keep_pages > 0 ? (int64_t) keep_pages : 0);
+                const bool over_limit = eject_limit > 0 &&
+                    (int64_t) st.active_pages + eject_pages > eject_limit;
+                const bool trigger = keep_pages > 0 ? over_limit : (st.streaming || over_limit);
+                if (eject_limit == 0 || !trigger) {
                     mtp_stable = 0;
                     return;
                 }
@@ -2907,8 +2912,13 @@ private:
             }
 
             const int32_t reenable_pages = std::max(0, params_base.speculative.kv_stream_mtp_reenable_pages);
-            if (st.streaming || st.mtp_reserved_bytes == 0 || mtp_capacity_pages == 0 ||
-                    (int64_t) st.active_pages + reenable_pages > (int64_t) mtp_capacity_pages) {
+            const int32_t keep_pages     = std::max(0, params_base.speculative.kv_stream_mtp_keep_pages);
+            const int64_t reenable_limit = std::max<int64_t>(
+                (int64_t) mtp_capacity_pages, keep_pages > 0 ? (int64_t) keep_pages : 0);
+            // without a threshold, streaming blocks re-enable; with one, only
+            // the working set matters
+            if ((keep_pages == 0 && st.streaming) || st.mtp_reserved_bytes == 0 || reenable_limit == 0 ||
+                    (int64_t) st.active_pages + reenable_pages > reenable_limit) {
                 mtp_stable = 0;
                 return;
             }

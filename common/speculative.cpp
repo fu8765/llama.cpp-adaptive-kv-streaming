@@ -1542,6 +1542,19 @@ struct common_speculative_impl_draft_mtp : public common_speculative_impl {
 
             auto * mem_dft = llama_get_memory(ctx_dft);
 
+            // slide the draft KV window so the draft can follow the target
+            // past the pinned window while it is streaming
+            const int32_t keep = std::max(1, (int32_t) llama_n_ctx(ctx_dft) - 256);
+            for (llama_seq_id seq_id = 0; seq_id < (llama_seq_id) n_seq; ++seq_id) {
+                if (i_batch_beg[seq_id] < 0) {
+                    continue;
+                }
+                const llama_pos pos_new = batch_in.pos[i_batch_end[seq_id]];
+                if (pos_new >= keep) {
+                    llama_memory_seq_rm(mem_dft, seq_id, 0, pos_new - keep + 1);
+                }
+            }
+
             bool ok = true;
             for (int head = 0; head < n_mtp_layers; ++head) {
                 if (chain_heads) {

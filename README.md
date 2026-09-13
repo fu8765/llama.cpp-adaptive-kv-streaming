@@ -87,6 +87,34 @@ context can fail to allocate its compute buffer. Details and the throughput
 table are in
 [docs/next-steps/01-mtp-kv-quantization.md](docs/next-steps/01-mtp-kv-quantization.md).
 
+### MTP during streaming
+
+By default the dynamic controller ejects MTP at streaming onset. Keeping it
+active lets it speculate on the recent window while the target streams, and the
+draft KV now slides (evicting the oldest cells) so it can follow the target past
+the pinned window. `--kv-stream-mtp-keep-pages N` sets how long to keep it: MTP
+stays active until the target's decode working set exceeds `N` 256-token pages,
+then ejects as usual. `0` (default) ejects at streaming onset; a very large `N`
+keeps it active throughout. The measurements below are the keep-throughout arm;
+at arena 3072 the crossover is about 380 pages (about 97K tokens), so
+`--kv-stream-mtp-keep-pages 380` reproduces it. Requires
+`--kv-stream-mtp-dynamic`.
+
+| prompt | keep tg t/s | default tg t/s | keep/default | keep pp t/s | default pp t/s |
+|---:|---:|---:|---:|---:|---:|
+| 50,000 | 30.40 | 22.32 | 1.36x | 686.8 | 711.4 |
+| 80,000 | 23.25 | 19.61 | 1.19x | 598.6 | 670.2 |
+| 90,000 | 21.47 | 18.81 | 1.14x | 571.7 | 653.4 |
+| 100,000 | 17.21 | 18.13 | 0.95x | 548.3 | 636.9 |
+| 120,000 | 12.68 | 15.80 | 0.80x | 505.2 | 599.5 |
+| 160,000 | 7.15 | 12.15 | 0.59x | 435.1 | 522.7 |
+
+Measured at arena 3072, ctx 160000, q8_0 K / q4_0 V, 256 decode tokens. Keeping
+MTP is faster up to about 97,000 tokens and slower beyond; prefill pays 3.5 to 17
+percent because the draft runs during prefill too. Reproduce with
+`benchmarks/benchmark_mtp_streaming.py`; details in
+[docs/next-steps/02-mtp-during-streaming.md](docs/next-steps/02-mtp-during-streaming.md).
+
 ## Differences from upstream
 
 ### Phase arena: speculative verify batches
@@ -166,6 +194,7 @@ the target LM head; pass `--with-lm-head` to keep it. Use the result with
 - `--kv-stream-mtp-reenable-pages N`: re-enable once the active pages fit at least `N` pages below that capacity. Must be greater than `--kv-stream-mtp-eject-pages` (default: 8).
 - `--kv-stream-mtp-stable-decodes N`: consecutive decode batches required before a transition (default: 4).
 - `--kv-stream-mtp-kv-pages N`: size of the pinned MTP KV reservation, in 256-token pages. `0` (default) sizes the pin to the MTP-active decode window automatically; a positive `N` pins exactly `N` pages and caps the window there. Requires `--kv-stream-mtp-dynamic`.
+- `--kv-stream-mtp-keep-pages N`: keep MTP active until the target's decode working set exceeds `N` 256-token pages, then eject like the default. `0` (default) ejects at streaming onset; use a large value to keep MTP active throughout. The draft KV slides to follow the target. Requires `--kv-stream-mtp-dynamic`.
 
 The `LLAMA_ARG_KV_STREAM_MTP_*` environment variables mirror these options. Ejecting returns the MTP weights, the MTP KV cache, and the widened recurrent-state cache to the arena pool; re-enabling restores them. The default configuration ejects at streaming onset and re-enables with an 8-page hysteresis band.
 
@@ -225,11 +254,11 @@ the model leaves.
 
 ## Next steps
 
-Task 1 is implemented on `feature/mtp-next-steps`; tasks 2 and 3 are still
+Tasks 1 and 2 are implemented on `feature/mtp-next-steps`; task 3 is still
 planned.
 
 - [Quantize the MTP draft KV cache](docs/next-steps/01-mtp-kv-quantization.md): make the automatic pin track `-ctkd`/`-ctvd` so the freed KV becomes decode window. Implemented; see the MTP KV quantization results above.
-- [Keep MTP active while streaming](docs/next-steps/02-mtp-during-streaming.md): eject on measured copy pressure instead of streaming onset.
+- [Keep MTP active while streaming](docs/next-steps/02-mtp-during-streaming.md): slide the draft KV and set the eject point with `--kv-stream-mtp-keep-pages`. Implemented; the measured crossover is ~97K tokens (about 380 pages at arena 3072). A copy-pressure policy to find it automatically is still open.
 - [Enable DFlash2](docs/next-steps/03-dflash2-draft.md): build a vocabulary-matching draft for the condensed target and generalize the pin and eject path.
 
 ## Scope and status

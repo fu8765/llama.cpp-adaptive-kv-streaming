@@ -901,6 +901,10 @@ static bool common_params_parse_ex(int argc, char ** argv, common_params_context
             params.speculative.kv_stream_mtp_kv_pages));
     }
 
+    if (params.speculative.kv_stream_mtp_keep_pages != 0 && !params.speculative.kv_stream_mtp_dynamic) {
+        throw std::invalid_argument("error: --kv-stream-mtp-keep-pages requires --kv-stream-mtp-dynamic\n");
+    }
+
     postprocess_cpu_params(params.cpuparams,       nullptr);
     postprocess_cpu_params(params.cpuparams_batch, &params.cpuparams);
 
@@ -4201,6 +4205,16 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
             params.speculative.kv_stream_mtp_dynamic = true;
         }
     ).set_spec().set_examples({LLAMA_EXAMPLE_SERVER}).set_env("LLAMA_ARG_KV_STREAM_MTP_DYNAMIC"));
+    add_opt(common_arg(
+        {"--kv-stream-mtp-keep-pages"}, "N",
+        string_format("keep MTP active until the decode working set exceeds N pages (256 tokens each), then eject; 0 ejects at streaming onset (default: %d)", params.speculative.kv_stream_mtp_keep_pages),
+        [](common_params & params, int value) {
+            if (value < 0) {
+                throw std::invalid_argument("kv-stream MTP keep pages must be non-negative");
+            }
+            params.speculative.kv_stream_mtp_keep_pages = value;
+        }
+    ).set_spec().set_examples({LLAMA_EXAMPLE_SERVER}).set_env("LLAMA_ARG_KV_STREAM_MTP_KEEP_PAGES"));
     add_opt(common_arg(
         {"--kv-stream-mtp-eject-pages"}, "N",
         string_format("eject MTP when the active pages exceed the MTP-active decode capacity by this many pages (default: %d)", params.speculative.kv_stream_mtp_eject_pages),

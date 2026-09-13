@@ -388,6 +388,7 @@ struct common_params_speculative {
     int32_t kv_stream_mtp_reenable_pages = 8;     // re-enable when active pages fit below that capacity by this
     int32_t kv_stream_mtp_stable_decodes = 4;     // consecutive decode batches needed for a transition
     int32_t kv_stream_mtp_kv_pages       = 0;     // pinned MTP KV pages, 0 = pin the MTP-active decode window
+    int32_t kv_stream_mtp_keep_pages     = 0;     // keep MTP active until the decode working set exceeds this; 0 = eject at streaming onset
 
     bool has_dft() const {
         return !draft.mparams.empty();
