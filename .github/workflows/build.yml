@@ -33,6 +33,12 @@ jobs:
       - name: Setup Visual Studio Developer Environment
         uses: ilammy/msvc-dev-cmd@v1
 
+      - name: Show CUDA version
+        shell: pwsh
+        run: |
+          $env:PATH = "${{ steps.cuda.outputs.CUDA_PATH }}\bin;" + $env:PATH
+          nvcc --version
+
       - name: Configure CMake for Blackwell (sm120)
         shell: pwsh
         run: |
@@ -52,7 +58,6 @@ jobs:
         shell: pwsh
         run: |
           $env:PATH = "${{ steps.cuda.outputs.CUDA_PATH }}\bin;" + $env:PATH
-          # Limit compilation to 2 parallel jobs to stay within GitHub runner RAM limits
           cmake --build build --target llama-server -j 2
 
       - name: Verify Adaptive KV in compiled binary
@@ -65,13 +70,22 @@ jobs:
             throw "ERROR: llama-server.exe was not found in build directory."
           }
 
-          Write-Host "Performing static string inspection on binary..."
+          Write-Host "Reading binary stream via ASCII and Unicode encodings..."
           $bytes = [System.IO.File]::ReadAllBytes($server)
-          $text = [System.Text.Encoding]::UTF8.GetString($bytes)
+          $asciiText = [System.Text.Encoding]::ASCII.GetString($bytes)
+          $unicodeText = [System.Text.Encoding]::Unicode.GetString($bytes)
 
-          if ($text -match "kv-stream-stage-mib") {
+          $found = ($asciiText -like "*kv-stream-stage-mib*") -or ($unicodeText -like "*kv-stream-stage-mib*")
+
+          if ($found) {
             Write-Host "SUCCESS: Adaptive KV flag confirmed inside compiled binary!"
           } else {
+            Write-Host "Exact string match failed. Scanning binary for any related 'kv-' flags..."
+            $kvMatches = [regex]::Matches($asciiText, "kv[-_a-zA-Z0-9]{3,40}") | Select-Object -ExpandProperty Value -Unique
+            if ($kvMatches) {
+              Write-Host "Found related flags/strings in binary:"
+              $kvMatches | ForEach-Object { Write-Host " - $_" }
+            }
             throw "ERROR: --kv-stream-stage-mib flag was NOT found inside compiled binary."
           }
 
