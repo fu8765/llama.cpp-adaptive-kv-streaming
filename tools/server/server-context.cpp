@@ -1017,6 +1017,12 @@ private:
             slot.spec_is_replay = false;
             slot.spec_prompt.clear();
         }
+
+        // the toggle changes the KV layout and may free the draft context, so
+        // cached states from the previous layout can no longer be restored
+        if (prompt_cache) {
+            prompt_cache->states.clear();
+        }
     }
 
     void destroy() {
