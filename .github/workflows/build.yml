@@ -9,8 +9,6 @@ jobs:
     steps:
       - name: Checkout Adaptive KV Branch
         uses: actions/checkout@v4
-        with:
-          ref: feature/adaptive-kv-stream
 
       - name: Setup CUDA Toolkit 13.2
         id: cuda
